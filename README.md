@@ -2,7 +2,7 @@
 
 A lightweight, standalone browser spectrogram visualizer for live microphone audio. Static app that runs entirely in the browser. No server, no build step, no dependencies.
 
-**Access here:** [https://rzagreb.github.io/spectri/](https://rzagreb.github.io/spectri/)
+**Access here:** [https://rzagreb.github.io/spectri/app](https://rzagreb.github.io/spectri/app)
 
 ## Features
 
