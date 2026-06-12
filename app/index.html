@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Spectri — Live Spectrogram</title>
+  <meta name="description" content="A standalone browser spectrogram visualizer for live microphone audio." />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="app-header">
+    <h1>Spectri</h1>
+    <p class="tagline">Live microphone spectrogram</p>
+  </header>
+
+  <div class="toolbar" role="toolbar" aria-label="Controls">
+    <div class="control-group primary">
+      <button id="startBtn" class="btn btn-primary" type="button"
+        title="Start or stop listening to your microphone">Start</button>
+      <button id="pauseBtn" class="btn" type="button" disabled
+        title="Freeze the picture on screen (your microphone stays on)">Pause</button>
+      <button id="clearBtn" class="btn" type="button"
+        title="Wipe the spectrogram and start with a blank screen">Clear</button>
+      <button id="saveBtn" class="btn" type="button" disabled
+        title="Download the current spectrogram as a PNG image">Save PNG</button>
+      <button id="fullscreenBtn" class="btn" type="button"
+        title="Expand the spectrogram to fill the whole screen">Fullscreen</button>
+    </div>
+
+    <div class="control-group" title="Choose which microphone to listen to">
+      <label for="deviceSelect">Mic</label>
+      <select id="deviceSelect" disabled>
+        <option value="">Default</option>
+      </select>
+    </div>
+
+    <div class="control-group" title="Detail level. Higher numbers show finer frequency detail, but react a little slower to changes.">
+      <label for="fftSelect">FFT</label>
+      <select id="fftSelect">
+        <option value="512">512</option>
+        <option value="1024">1024</option>
+        <option value="2048" selected>2048</option>
+        <option value="4096">4096</option>
+        <option value="8192">8192</option>
+      </select>
+    </div>
+
+    <div class="control-group" title="Color theme used to paint the sound — purely visual, pick whichever you like best">
+      <label for="colorSelect">Colors</label>
+      <select id="colorSelect">
+        <option value="viridis" selected>Viridis</option>
+        <option value="magma">Magma</option>
+        <option value="inferno">Inferno</option>
+        <option value="jet">Jet</option>
+        <option value="grayscale">Grayscale</option>
+      </select>
+    </div>
+
+    <div class="control-group" title="Spreads out the low (bass) frequencies so they're easier to see. Good for music and speech.">
+      <label class="checkbox">
+        <input type="checkbox" id="logToggle" />
+        Log scale
+      </label>
+    </div>
+
+    <div class="control-group" title="Lowest frequency (pitch) shown, in Hertz. Bass sounds are low numbers.">
+      <label for="minFreq">Min Hz</label>
+      <input type="number" id="minFreq" class="num" min="0" step="10" value="20" />
+    </div>
+
+    <div class="control-group" title="Highest frequency (pitch) shown, in Hertz. Lower this to zoom into low/bass sounds.">
+      <label for="maxFreq">Max Hz</label>
+      <input type="number" id="maxFreq" class="num" min="10" step="100" value="18000" />
+    </div>
+
+    <div class="control-group" title="Quietest sound that shows up. Raise it to hide background hiss; lower it to reveal faint sounds.">
+      <label for="floorRange">dB floor <span class="val" id="floorVal">-100</span></label>
+      <input type="range" id="floorRange" min="-120" max="-20" step="1" value="-100" />
+    </div>
+
+    <div class="control-group" title="Loudness that shows as the brightest color. Lower it to make quiet sounds look brighter.">
+      <label for="ceilRange">dB ceil <span class="val" id="ceilVal">-30</span></label>
+      <input type="range" id="ceilRange" min="-60" max="0" step="1" value="-30" />
+    </div>
+
+    <div class="control-group" title="Steadies the picture over time. Higher = smoother and calmer; lower = snappier and more jittery.">
+      <label for="smoothRange">Smooth <span class="val" id="smoothVal">0.50</span></label>
+      <input type="range" id="smoothRange" min="0" max="0.95" step="0.05" value="0.5" />
+    </div>
+
+    <div class="control-group" title="Makes loud sounds pop out from the background. Higher = punchier; lower = shows more faint detail.">
+      <label for="contrastRange">Contrast <span class="val" id="contrastVal">0.9</span></label>
+      <input type="range" id="contrastRange" min="0.6" max="4" step="0.1" value="0.9" />
+    </div>
+
+    <div class="control-group" title="How fast the picture scrolls across the screen.">
+      <label for="speedRange">Speed <span class="val" id="speedVal">2</span></label>
+      <input type="range" id="speedRange" min="1" max="8" step="1" value="2" />
+    </div>
+
+    <div class="control-group meter-group" title="How loud your microphone is right now. It turns red if the sound is too loud and may distort.">
+      <label>Level</label>
+      <div class="meter" id="meter">
+        <div class="meter-fill" id="meterFill"></div>
+      </div>
+    </div>
+  </div>
+
+  <main class="stage">
+    <canvas id="freqAxis" class="freq-axis" aria-hidden="true"></canvas>
+    <div class="canvas-wrap" id="canvasWrap">
+      <canvas id="spectrogram"></canvas>
+      <div class="overlay" id="overlay">
+        <p>Click <strong>Start</strong> and allow microphone access to begin.</p>
+      </div>
+    </div>
+  </main>
+
+  <div class="status" id="status" role="status" aria-live="polite"></div>
+
+  <script src="app.js" defer></script>
+</body>
+</html>
