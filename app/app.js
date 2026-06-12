@@ -9,7 +9,7 @@
   // on load, so changing a default only ever needs an edit in this object.
   const DEFAULTS = {
     fft: '4096', color: 'jet', log: false,
-    floor: -95, ceil: -40, smooth: 0.5, speed: 2, gamma: 0.9,
+    floor: -95, ceil: -40, smooth: 0.2, speed: 2, gamma: 1.4,
     fmin: 20, fmax: 5000,
   };
 
@@ -53,6 +53,8 @@
     running: false,
     paused: false,
     rafId: 0,
+    lastT: 0,            // previous rAF timestamp (ms); 0 = no reference frame
+    acc: 0,              // fractional device pixels of scroll not yet drawn
     lut: null,
     floor: DEFAULTS.floor,
     ceil: DEFAULTS.ceil,
@@ -104,6 +106,8 @@
         ? ctx.getImageData(0, 0, canvas.width, canvas.height) : null;
       canvas.width = w;
       canvas.height = h;
+      // Resizing resets context state; keep scroll blits pixel-exact.
+      ctx.imageSmoothingEnabled = false;
       ctx.fillStyle = '#000';
       ctx.fillRect(0, 0, w, h);
       if (old) ctx.putImageData(old, 0, 0);
@@ -177,45 +181,72 @@
   }
 
   // ---- Render loop ----
-  function draw() {
+  // Scrolling is time-based: `speed` means CSS px per 1/60 s, so the image
+  // moves at the same rate (and smears the same amount) on 60 Hz and 120 Hz
+  // displays instead of scrolling twice as fast on ProMotion screens.
+  function draw(now) {
     state.rafId = requestAnimationFrame(draw);
-    if (!state.running) return;
+    if (!state.running || state.paused) { state.lastT = 0; return; }
+    if (!state.lastT) { state.lastT = now; state.acc = 0; return; }
 
-    if (state.paused) return;
+    const w = canvas.width, h = canvas.height;
+    const dpr = window.devicePixelRatio || 1;
+    // Clamp dt so a background-tab gap doesn't paint one huge stale column.
+    state.acc += Math.min((now - state.lastT) / 1000, 0.25) * state.speed * 60 * dpr;
+    state.lastT = now;
+    let cols = state.acc | 0;
+    if (!cols) return;
+    state.acc -= cols;
+    if (cols > w) { cols = w; state.acc = 0; }
 
     state.analyser.getFloatFrequencyData(state.freqData);
 
-    const w = canvas.width, h = canvas.height;
-    const speed = state.speed;
     const binCount = state.analyser.frequencyBinCount;
     const nyquist = state.audioCtx.sampleRate / 2;
     const range = (state.ceil - state.floor) || 1;
     const lut = state.lut;
 
-    // Scroll existing content left by `speed` device pixels.
-    ctx.drawImage(canvas, speed, 0, w - speed, h, 0, 0, w - speed, h);
+    // Scroll existing content left by `cols` device pixels.
+    if (cols < w) ctx.drawImage(canvas, cols, 0, w - cols, h, 0, 0, w - cols, h);
 
-    // Build the newest column (height h), then stamp it `speed` px wide.
-    const col = ctx.createImageData(speed, h);
+    // Build the newest column (height h), then stamp it `cols` px wide.
+    const col = ctx.createImageData(cols, h);
     const data = col.data;
     const { fmin, fmax } = freqRange(nyquist);
     const logDen = Math.log(fmax / fmin);
     const linSpan = fmax - fmin;
-
     const maxBin = binCount - 1;
-    for (let y = 0; y < h; y++) {
+
+    // FFT bin index at every pixel-row boundary; row y covers
+    // edges[y] (top, higher frequency) down to edges[y+1].
+    const edges = new Float32Array(h + 1);
+    for (let y = 0; y <= h; y++) {
       // y=0 is top → highest displayed frequency.
-      const frac = 1 - y / (h - 1 || 1);
+      const frac = 1 - (y - 0.5) / (h - 1 || 1);
       const freq = state.log ? fmin * Math.exp(frac * logDen) : fmin + frac * linSpan;
       let binF = (freq / nyquist) * maxBin;
       if (binF < 0) binF = 0; else if (binF > maxBin) binF = maxBin;
+      edges[y] = binF;
+    }
 
-      // Linearly interpolate between adjacent bins so sparse low-frequency
-      // bins render as smooth gradients instead of blocky bands.
-      const b0 = binF | 0;
-      const b1 = b0 < maxBin ? b0 + 1 : b0;
-      const t = binF - b0;
-      const db = state.freqData[b0] * (1 - t) + state.freqData[b1] * t;
+    for (let y = 0; y < h; y++) {
+      const hiBin = edges[y], loBin = edges[y + 1];
+      const b0 = Math.ceil(loBin), b1 = Math.floor(hiBin);
+      let db;
+      if (b1 - b0 >= 1) {
+        // Several bins land on this row: keep the strongest so narrow peaks
+        // stay sharp instead of being sampled away (max-pooling).
+        db = -Infinity;
+        for (let b = b0; b <= b1; b++) if (state.freqData[b] > db) db = state.freqData[b];
+      } else {
+        // Row sits between bins: interpolate the two neighbours so sparse
+        // low-frequency bins render as smooth gradients instead of blocky bands.
+        const c = (loBin + hiBin) / 2;
+        const lo = c | 0;
+        const hi = lo < maxBin ? lo + 1 : lo;
+        const t = c - lo;
+        db = state.freqData[lo] * (1 - t) + state.freqData[hi] * t;
+      }
       let n = (db - state.floor) / range;
       if (n < 0) n = 0; else if (n > 1) n = 1;
       // Contrast curve: pushes weak noise toward black while keeping strong
@@ -224,12 +255,12 @@
       const li = (n * 255) | 0;
       const r = lut[li * 3], g = lut[li * 3 + 1], b = lut[li * 3 + 2];
 
-      for (let x = 0; x < speed; x++) {
-        const p = (y * speed + x) * 4;
+      for (let x = 0; x < cols; x++) {
+        const p = (y * cols + x) * 4;
         data[p] = r; data[p + 1] = g; data[p + 2] = b; data[p + 3] = 255;
       }
     }
-    ctx.putImageData(col, w - speed, 0);
+    ctx.putImageData(col, w - cols, 0);
   }
 
   // ---- Audio ----
@@ -273,7 +304,7 @@
       drawAxis();
       setStatus(`Listening — ${Math.round(state.audioCtx.sampleRate / 1000)} kHz, FFT ${state.analyser.fftSize}.`);
 
-      if (!state.rafId) draw();
+      if (!state.rafId) state.rafId = requestAnimationFrame(draw);
     } catch (err) {
       handleError(err);
     }
@@ -283,6 +314,7 @@
     state.running = false;
     state.paused = false;
     if (state.rafId) { cancelAnimationFrame(state.rafId); state.rafId = 0; }
+    state.lastT = 0;
     if (state.source) { try { state.source.disconnect(); } catch (_) {} state.source = null; }
     if (state.stream) { state.stream.getTracks().forEach((t) => t.stop()); state.stream = null; }
     renderPlay();
@@ -420,6 +452,10 @@
   });
 
   window.addEventListener('resize', resizeCanvas);
+  // Catch stage size changes that don't fire a window resize (status text
+  // wrapping, iOS dynamic chrome with dvh) — a stale backing store means the
+  // browser CSS-stretches the canvas, blurring everything.
+  if (window.ResizeObserver) new ResizeObserver(resizeCanvas).observe(canvas);
 
   // ---- Helpers ----
   function setStatus(msg, isError) {
