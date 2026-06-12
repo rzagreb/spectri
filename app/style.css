@@ -254,6 +254,14 @@ input[type="number"].num {
 }
 .status.error { color: var(--danger); }
 
+/* Immersive mode: axis + status leave the layout once (single canvas resize);
+   the FABs are fixed-position, so the idle fade never re-layouts the stage. */
+.fab { transition: opacity 0.25s; }
+body.immersive .freq-axis,
+body.immersive .status { display: none; }
+body.immersive.ui-hidden .fab { opacity: 0; pointer-events: none; }
+body.immersive.ui-hidden { cursor: none; }
+
 @media (max-width: 640px) {
   /* iOS zooms the page when a focused field is < 16px; bump form controls. */
   select, input[type="number"].num, .btn, .panel-close { font-size: 16px; }

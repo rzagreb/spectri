@@ -11,6 +11,8 @@
   <div class="fab">
     <button id="playBtn" class="fab-btn" type="button"
       aria-label="Start" title="Start">▶</button>
+    <button id="immersiveBtn" class="fab-btn" type="button"
+      aria-label="Immersive view" title="Immersive view — hide UI (Esc to exit)">⛶</button>
     <button id="menuBtn" class="fab-btn" type="button"
       aria-expanded="false" aria-controls="controlsPanel"
       aria-label="Open controls" title="Open controls">☰</button>
@@ -32,6 +34,14 @@
         <label for="deviceSelect">Mic</label>
         <select id="deviceSelect" disabled>
           <option value="">Default</option>
+        </select>
+      </div>
+
+      <div class="control-group" title="How the sound is drawn. Spectrogram scrolls frequencies over time; Galaxy wraps the live spectrum into a glowing spiral — bass at the core, highs at the rim.">
+        <label for="modeSelect">Mode</label>
+        <select id="modeSelect">
+          <option value="classic">Spectrogram</option>
+          <option value="galaxy">Galaxy</option>
         </select>
       </div>
 

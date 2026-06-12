@@ -10,7 +10,7 @@
   const DEFAULTS = {
     fft: '4096', color: 'jet', log: false,
     floor: -95, ceil: -40, smooth: 0.2, speed: 2, gamma: 1.4,
-    fmin: 20, fmax: 5000,
+    fmin: 20, fmax: 5000, mode: 'classic',
   };
 
   // ---- DOM ----
@@ -23,6 +23,8 @@
   const fftSelect = $('fftSelect');
   const colorSelect = $('colorSelect');
   const logToggle = $('logToggle');
+  const modeSelect = $('modeSelect');
+  const immersiveBtn = $('immersiveBtn');
   const minFreqInput = $('minFreq');
   const maxFreqInput = $('maxFreq');
   const floorRange = $('floorRange');
@@ -64,6 +66,20 @@
     colormap: DEFAULTS.color,
     fmin: DEFAULTS.fmin,  // displayed min frequency (Hz)
     fmax: DEFAULTS.fmax,  // displayed max frequency (Hz)
+    mode: DEFAULTS.mode,  // 'classic' (scrolling spectrogram) | 'galaxy' (art)
+  };
+
+  // ---- Art mode runtime (radial galaxy) ----
+  // The feedback trail lives on its own canvas pair: the main ctx keeps
+  // imageSmoothingEnabled=false for the classic pixel-exact scroll blit, while
+  // the feedback zoom needs smoothing ON to resample cleanly. Art mode only
+  // ever blits 1:1 onto the main canvas, so the two modes never share state.
+  const art = {
+    front: null, back: null, // {cv, c2d} feedback ping-pong pair
+    strip: null,             // alpha canvas holding one spoke texture (rim→core)
+    stripCtx: null,
+    angle: 0,                // accumulated spoke rotation (rad)
+    energy: 0, bass: 0,      // smoothed 0..1 loudness detectors
   };
 
   // ---- Colormaps (piecewise-linear control points) ----
@@ -140,6 +156,9 @@
     axisCtx.clearRect(0, 0, w, h);
     axisCtx.fillStyle = '#161a22';
     axisCtx.fillRect(0, 0, w, h);
+    // Radius (not the vertical axis) encodes frequency in galaxy mode, so
+    // the tick labels would be meaningless — leave the panel blank.
+    if (state.mode === 'galaxy') return;
     if (!state.audioCtx) return;
     const nyquist = state.audioCtx.sampleRate / 2;
     const { fmin, fmax } = freqRange(nyquist);
@@ -189,11 +208,15 @@
     if (!state.running || state.paused) { state.lastT = 0; return; }
     if (!state.lastT) { state.lastT = now; state.acc = 0; return; }
 
+    // Clamp dt so a background-tab gap doesn't paint one huge stale column
+    // (or one giant art-mode fade/zoom step).
+    const dt = Math.min((now - state.lastT) / 1000, 0.25);
+    state.lastT = now;
+    if (state.mode === 'galaxy') { drawArt(dt, now); return; }
+
     const w = canvas.width, h = canvas.height;
     const dpr = window.devicePixelRatio || 1;
-    // Clamp dt so a background-tab gap doesn't paint one huge stale column.
-    state.acc += Math.min((now - state.lastT) / 1000, 0.25) * state.speed * 60 * dpr;
-    state.lastT = now;
+    state.acc += dt * state.speed * 60 * dpr;
     let cols = state.acc | 0;
     if (!cols) return;
     state.acc -= cols;
@@ -261,6 +284,197 @@
       }
     }
     ctx.putImageData(col, w - cols, 0);
+  }
+
+  // ---- Art mode: radial galaxy ----
+  // The live spectrum is painted once per frame into a thin radial "strip"
+  // (row 0 = rim = fmax, last row = core = fmin), then stamped around the
+  // circle as glowing additive spokes. Each frame the previous image is
+  // re-drawn slightly zoomed outward, rotated and dimmed, so history spirals
+  // away from the center like a nebula.
+
+  function blackFill(c2d, cv) {
+    c2d.setTransform(1, 0, 0, 1, 0, 0);
+    c2d.globalAlpha = 1;
+    c2d.globalCompositeOperation = 'source-over';
+    c2d.fillStyle = '#000';
+    c2d.fillRect(0, 0, cv.width, cv.height);
+  }
+
+  function ensureArtCanvases(w, h) {
+    if (art.front && art.front.cv.width === w && art.front.cv.height === h) return;
+    const make = () => {
+      const cv = document.createElement('canvas');
+      cv.width = w; cv.height = h;
+      const c2d = cv.getContext('2d', { alpha: false });
+      c2d.imageSmoothingEnabled = true; // the feedback zoom must interpolate
+      c2d.fillStyle = '#000';
+      c2d.fillRect(0, 0, w, h);
+      return { cv, c2d };
+    };
+    const old = art.front;
+    art.front = make();
+    art.back = make();
+    // Keep the nebula across resizes (stretch is fine — it's abstract art).
+    if (old) art.front.c2d.drawImage(old.cv, 0, 0, w, h);
+  }
+
+  function resetArtTrails() {
+    if (art.front) blackFill(art.front.c2d, art.front.cv);
+    if (art.back) blackFill(art.back.c2d, art.back.cv);
+    art.energy = 0;
+    art.bass = 0;
+  }
+
+  // Average normalized loudness (0..1) over a frequency band.
+  function bandEnergy(loHz, hiHz, nyquist, maxBin) {
+    const hzPerBin = nyquist / maxBin;
+    const b0 = Math.max(1, Math.floor(loHz / hzPerBin));
+    const b1 = Math.min(maxBin, Math.ceil(hiHz / hzPerBin));
+    if (b1 < b0) return 0;
+    const range = (state.ceil - state.floor) || 1;
+    let sum = 0;
+    for (let b = b0; b <= b1; b++) {
+      const n = (state.freqData[b] - state.floor) / range;
+      sum += n < 0 ? 0 : n > 1 ? 1 : n;
+    }
+    return sum / (b1 - b0 + 1);
+  }
+
+  // Build the spoke texture. Same bin mapping as the classic column loop
+  // (max-pooling when several bins land on a row, interpolation between
+  // sparse bins), but with per-pixel alpha so quiet frequencies stay
+  // transparent — additive spoke stamping then never builds up gray haze.
+  function buildStrip(R, fmin, fmax, nyquist) {
+    const dpr = window.devicePixelRatio || 1;
+    const SW = Math.max(2, Math.round(2 * dpr));
+    if (!art.strip || art.strip.width !== SW || art.strip.height !== R) {
+      art.strip = document.createElement('canvas');
+      art.strip.width = SW;
+      art.strip.height = R;
+      art.stripCtx = art.strip.getContext('2d');
+    }
+    const img = art.stripCtx.createImageData(SW, R);
+    const data = img.data;
+    const maxBin = state.analyser.frequencyBinCount - 1;
+    const range = (state.ceil - state.floor) || 1;
+    const lut = state.lut;
+    const logDen = Math.log(fmax / fmin);
+    const linSpan = fmax - fmin;
+
+    const edges = new Float32Array(R + 1);
+    for (let y = 0; y <= R; y++) {
+      const frac = 1 - (y - 0.5) / (R - 1 || 1); // row 0 = rim = fmax
+      const freq = state.log ? fmin * Math.exp(frac * logDen) : fmin + frac * linSpan;
+      let binF = (freq / nyquist) * maxBin;
+      if (binF < 0) binF = 0; else if (binF > maxBin) binF = maxBin;
+      edges[y] = binF;
+    }
+    for (let y = 0; y < R; y++) {
+      const hiBin = edges[y], loBin = edges[y + 1];
+      const b0 = Math.ceil(loBin), b1 = Math.floor(hiBin);
+      let db;
+      if (b1 - b0 >= 1) {
+        db = -Infinity;
+        for (let b = b0; b <= b1; b++) if (state.freqData[b] > db) db = state.freqData[b];
+      } else {
+        const c = (loBin + hiBin) / 2;
+        const lo = c | 0;
+        const hi = lo < maxBin ? lo + 1 : lo;
+        const t = c - lo;
+        db = state.freqData[lo] * (1 - t) + state.freqData[hi] * t;
+      }
+      let n = (db - state.floor) / range;
+      if (n < 0) n = 0; else if (n > 1) n = 1;
+      n = Math.pow(n, state.gamma);
+      const li = (n * 255) | 0;
+      const r = lut[li * 3], g = lut[li * 3 + 1], b = lut[li * 3 + 2];
+      for (let x = 0; x < SW; x++) {
+        const p = (y * SW + x) * 4;
+        data[p] = r; data[p + 1] = g; data[p + 2] = b; data[p + 3] = li;
+      }
+    }
+    art.stripCtx.putImageData(img, 0, 0);
+  }
+
+  function drawArt(dt, now) {
+    const w = canvas.width, h = canvas.height;
+    ensureArtCanvases(w, h);
+    state.analyser.getFloatFrequencyData(state.freqData);
+
+    const nyquist = state.audioCtx.sampleRate / 2;
+    const { fmin, fmax } = freqRange(nyquist);
+    const maxBin = state.analyser.frequencyBinCount - 1;
+
+    // Loudness detectors: fast attack, slow release, frame-rate independent.
+    const loud = bandEnergy(fmin, fmax, nyquist, maxBin);
+    const bassE = bandEnergy(fmin, Math.min(250, fmax), nyquist, maxBin);
+    const follow = (cur, target, up, down) =>
+      cur + (target - cur) * (1 - Math.pow(target > cur ? up : down, dt * 60));
+    art.energy = follow(art.energy, loud, 0.55, 0.93);
+    art.bass = follow(art.bass, bassE, 0.45, 0.90);
+
+    const cx = w / 2, cy = h / 2;
+    const rMax = 0.5 * Math.min(w, h);
+    const rCore = 0.06 * Math.min(w, h);
+    buildStrip(Math.max(2, Math.round(rMax - rCore)), fmin, fmax, nyquist);
+
+    // Dynamics: Speed sets the base pace, loudness adds drama. Everything is
+    // raised to dt so 60 Hz and 120 Hz displays drift and fade at one rate.
+    const trail = Math.pow(0.08, dt); // 8% of the image survives one second
+    const zoom = Math.pow(1.03 + 0.02 * state.speed + 0.30 * art.energy, dt);
+    const omega = 0.03 * state.speed + 0.9 * art.energy; // rad/s
+    art.angle -= 0.25 * omega * dt; // spokes counter-rotate slightly (parallax)
+
+    const src = art.front, dst = art.back;
+    const c = dst.c2d;
+
+    // 1) Previous frame zoomed outward + rotated + dimmed: the spiral trail.
+    c.globalCompositeOperation = 'source-over';
+    c.globalAlpha = 1;
+    c.fillStyle = '#000';
+    c.fillRect(0, 0, w, h);
+    c.globalAlpha = trail;
+    c.setTransform(1, 0, 0, 1, cx, cy);
+    c.rotate(omega * dt);
+    c.scale(zoom, zoom);
+    c.drawImage(src.cv, -cx, -cy);
+    c.setTransform(1, 0, 0, 1, cx, cy);
+    c.globalAlpha = 1;
+
+    // 2) Live spectrum stamped as glowing spokes (additive).
+    c.globalCompositeOperation = 'lighter';
+    const N = 120;
+    const sw = art.strip.width;
+    const t = now * 0.001;
+    for (let i = 0; i < N; i++) {
+      c.save();
+      c.rotate(art.angle + (i / N) * Math.PI * 2);
+      // Deterministic per-spoke flicker for organic shimmer.
+      c.globalAlpha = 0.35 + 0.3 * Math.sin(i * 2.39996 + t * (1 + (i % 5)));
+      c.drawImage(art.strip, -sw / 2, -rMax);
+      c.restore();
+    }
+
+    // 3) Bass pulse at the core, tinted from the bright end of the active LUT.
+    const li = 230;
+    const col = `rgba(${state.lut[li * 3]},${state.lut[li * 3 + 1]},${state.lut[li * 3 + 2]},`;
+    const br = rCore * (1.0 + 2.5 * art.bass);
+    const g = c.createRadialGradient(0, 0, 0, 0, 0, br);
+    g.addColorStop(0, col + (0.85 * art.bass).toFixed(3) + ')');
+    g.addColorStop(1, col + '0)');
+    c.fillStyle = g;
+    c.beginPath();
+    c.arc(0, 0, br, 0, Math.PI * 2);
+    c.fill();
+
+    c.setTransform(1, 0, 0, 1, 0, 0);
+    c.globalCompositeOperation = 'source-over';
+
+    // 4) Present and swap the ping-pong pair.
+    ctx.drawImage(dst.cv, 0, 0);
+    art.front = dst;
+    art.back = src;
   }
 
   // ---- Audio ----
@@ -382,6 +596,7 @@
   function clearCanvas() {
     ctx.fillStyle = '#000';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
+    resetArtTrails();
   }
 
   clearBtn.addEventListener('click', clearCanvas);
@@ -396,6 +611,31 @@
   }
   menuBtn.addEventListener('click', () => toggleControls());
   closeBtn.addEventListener('click', () => toggleControls(false));
+
+  // ---- Immersive view (hide chrome for an always-on display) ----
+  // Axis + status leave the layout once per toggle; the FABs are fixed, so
+  // their idle fade (ui-hidden) never re-layouts the stage.
+  let uiIdleTimer = 0;
+  function pokeUi() {
+    if (!document.body.classList.contains('immersive')) return;
+    document.body.classList.remove('ui-hidden');
+    clearTimeout(uiIdleTimer);
+    uiIdleTimer = setTimeout(() => document.body.classList.add('ui-hidden'), 3000);
+  }
+  function setImmersive(on) {
+    document.body.classList.toggle('immersive', on);
+    if (on) pokeUi();
+    else { document.body.classList.remove('ui-hidden'); clearTimeout(uiIdleTimer); }
+    // Axis + status entered/left the layout; resize the canvas right away.
+    resizeCanvas();
+  }
+  immersiveBtn.addEventListener('click', () =>
+    setImmersive(!document.body.classList.contains('immersive')));
+  window.addEventListener('pointermove', pokeUi);
+  window.addEventListener('pointerdown', pokeUi);
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && document.body.classList.contains('immersive')) setImmersive(false);
+  });
 
   deviceSelect.addEventListener('change', () => {
     if (state.running) { stop(); start(); }
@@ -413,6 +653,13 @@
 
   logToggle.addEventListener('change', () => {
     state.log = logToggle.checked;
+    drawAxis();
+  });
+
+  modeSelect.addEventListener('change', () => {
+    state.mode = modeSelect.value;
+    clearCanvas();
+    state.acc = 0; // classic scroll accumulator: no burst when switching back
     drawAxis();
   });
 
@@ -483,6 +730,7 @@
     fftSelect.value = DEFAULTS.fft;
     colorSelect.value = DEFAULTS.color;
     logToggle.checked = DEFAULTS.log;
+    modeSelect.value = DEFAULTS.mode;
     minFreqInput.value = DEFAULTS.fmin;
     maxFreqInput.value = DEFAULTS.fmax;
     floorRange.value = DEFAULTS.floor;
@@ -492,6 +740,7 @@
     speedRange.value = DEFAULTS.speed;
 
     state.log = DEFAULTS.log;
+    state.mode = DEFAULTS.mode;
     state.colormap = DEFAULTS.color;
     state.floor = DEFAULTS.floor;
     state.ceil = DEFAULTS.ceil;
