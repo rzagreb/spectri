@@ -28,60 +28,89 @@ body {
   overflow: hidden;
 }
 
-/* Header */
-.app-header {
+/* Floating buttons — always-visible play/pause + menu, over the stage. */
+.fab {
+  position: fixed;
+  top: max(12px, env(safe-area-inset-top));
+  right: max(12px, env(safe-area-inset-right));
+  z-index: 50;
   display: flex;
-  align-items: baseline;
-  gap: 12px;
-  padding: 10px 16px;
+  gap: 8px;
+}
+.fab-btn {
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: rgba(22, 26, 34, 0.85);
+  color: var(--text);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  backdrop-filter: blur(4px);
+  transition: border-color 0.12s, background 0.12s, color 0.12s;
+}
+.fab-btn:hover { border-color: var(--accent); }
+.fab-btn.recording { border-color: var(--danger); color: var(--danger); }
+
+/* Controls drawer — slides in from the left; closed by default everywhere. */
+.controls-panel {
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 40;
+  height: 100%;
+  width: min(360px, 100%);
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border-right: 1px solid var(--border);
+  box-shadow: 8px 0 24px rgba(0, 0, 0, 0.4);
+  transform: translateX(-100%);
+  transition: transform 0.2s ease;
+}
+body.controls-open .controls-panel { transform: translateX(0); }
+.panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  padding-top: max(12px, env(safe-area-inset-top));
   padding-left: max(16px, env(safe-area-inset-left));
-  padding-right: max(16px, env(safe-area-inset-right));
   border-bottom: 1px solid var(--border);
   background: var(--panel);
 }
-.app-header h1 {
-  margin: 0;
-  font-size: 18px;
+.panel-title {
+  font-size: 16px;
+  font-weight: 600;
   letter-spacing: 0.5px;
 }
-.tagline {
-  margin: 0;
-  color: var(--muted);
-  font-size: 12px;
-}
-
-/* Primary bar — always visible: actions, level meter, settings toggle */
-.primary-bar {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 14px;
-  padding: 10px 16px;
-  padding-left: max(16px, env(safe-area-inset-left));
-  padding-right: max(16px, env(safe-area-inset-right));
+.panel-close {
+  appearance: none;
+  border: 1px solid var(--border);
   background: var(--panel-2);
-  border-bottom: 1px solid var(--border);
+  color: var(--text);
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  font-size: 15px;
+  cursor: pointer;
 }
-.settings-toggle { margin-left: auto; white-space: nowrap; }
-body.settings-open .settings-toggle { border-color: var(--accent); }
-
-/* Settings panel — collapsible. Inline (wrapping) on desktop, overlay drawer on mobile. */
-.settings-panel {
-  background: var(--panel-2);
-  border-bottom: 1px solid var(--border);
-}
-body:not(.settings-open) .settings-panel { display: none; }
-.settings-body {
+.panel-close:hover { border-color: var(--accent); }
+.panel-body {
+  flex: 1;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
   display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 14px;
-  padding: 10px 16px;
+  flex-direction: column;
+  gap: 18px;
+  padding: 16px;
   padding-left: max(16px, env(safe-area-inset-left));
-  padding-right: max(16px, env(safe-area-inset-right));
+  padding-bottom: max(16px, env(safe-area-inset-bottom));
 }
-/* The panel header (title + close) is only needed in the mobile drawer. */
-.settings-head { display: none; }
 .control-group {
   display: flex;
   flex-direction: column;
@@ -90,9 +119,16 @@ body:not(.settings-open) .settings-panel { display: none; }
 }
 .control-group.primary {
   flex-direction: row;
+  flex-wrap: wrap;
   gap: 8px;
   align-items: center;
 }
+.control-group.primary .btn { flex: 1 1 auto; }
+
+/* Inside the drawer, inputs span the full width for easy touch use. */
+.panel-body select,
+.panel-body input[type="range"],
+.panel-body input[type="number"].num { width: 100%; }
 .control-group > label {
   font-size: 11px;
   text-transform: uppercase;
@@ -168,24 +204,6 @@ input[type="number"].num {
   cursor: pointer;
 }
 
-/* Level meter */
-.meter-group { min-width: 90px; }
-.meter {
-  width: 120px;
-  height: 14px;
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  overflow: hidden;
-}
-.meter-fill {
-  height: 100%;
-  width: 0%;
-  background: linear-gradient(90deg, var(--ok), #d8d845 70%, var(--danger));
-  transition: width 0.05s linear;
-}
-.meter.clip { box-shadow: 0 0 0 2px var(--danger) inset; }
-
 /* Stage */
 .stage {
   flex: 1;
@@ -236,63 +254,8 @@ input[type="number"].num {
 }
 .status.error { color: var(--danger); }
 
-/* Fullscreen */
-.canvas-wrap:fullscreen { background: #000; }
-.canvas-wrap:fullscreen .overlay { background: rgba(0,0,0,0.85); }
-
 @media (max-width: 640px) {
-  input[type="range"] { width: 100%; min-width: 140px; }
-  .meter { width: 100%; }
-  .meter-group { flex: 1 1 120px; min-width: 90px; }
-
   /* iOS zooms the page when a focused field is < 16px; bump form controls. */
-  select, input[type="number"].num, .btn { font-size: 16px; }
-  .btn { padding: 10px 16px; } /* ~44px touch targets */
-
-  /* Settings becomes a scrollable overlay drawer so the spectrogram keeps
-     full height underneath. */
-  .settings-panel {
-    position: fixed;
-    left: 0;
-    right: 0;
-    top: 0;
-    bottom: 0;
-    z-index: 20;
-    overflow-y: auto;
-    border-bottom: none;
-    -webkit-overflow-scrolling: touch;
-    padding-bottom: env(safe-area-inset-bottom);
-  }
-  .settings-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    position: sticky;
-    top: 0;
-    padding: 12px 16px;
-    padding-left: max(16px, env(safe-area-inset-left));
-    padding-right: max(16px, env(safe-area-inset-right));
-    background: var(--panel);
-    border-bottom: 1px solid var(--border);
-  }
-  .settings-title {
-    font-size: 13px;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-    color: var(--muted);
-  }
-  .settings-close {
-    appearance: none;
-    border: 1px solid var(--border);
-    background: var(--panel-2);
-    color: var(--text);
-    width: 40px;
-    height: 40px;
-    border-radius: 8px;
-    font-size: 16px;
-    cursor: pointer;
-  }
-  /* Stack each control full-width so sliders are easy to drag. */
-  .settings-body { gap: 18px; }
-  .settings-body .control-group { width: 100%; }
+  select, input[type="number"].num, .btn, .panel-close { font-size: 16px; }
+  .btn { padding: 12px 16px; } /* ~44px touch targets */
 }

@@ -3,15 +3,22 @@
 (() => {
   'use strict';
 
+  // ---- Defaults (single source of truth) ----
+  // Every default value lives here. The DOM controls carry no `value`/`selected`
+  // attributes — `initControls()` writes these into both the inputs and `state`
+  // on load, so changing a default only ever needs an edit in this object.
+  const DEFAULTS = {
+    fft: '4096', color: 'jet', log: false,
+    floor: -95, ceil: -40, smooth: 0.5, speed: 2, gamma: 0.9,
+    fmin: 20, fmax: 5000,
+  };
+
   // ---- DOM ----
   const $ = (id) => document.getElementById(id);
-  const startBtn = $('startBtn');
-  const pauseBtn = $('pauseBtn');
+  const playBtn = $('playBtn');
   const clearBtn = $('clearBtn');
-  const saveBtn = $('saveBtn');
-  const fullscreenBtn = $('fullscreenBtn');
-  const settingsBtn = $('settingsBtn');
-  const settingsClose = $('settingsClose');
+  const menuBtn = $('menuBtn');
+  const closeBtn = $('closeBtn');
   const deviceSelect = $('deviceSelect');
   const fftSelect = $('fftSelect');
   const colorSelect = $('colorSelect');
@@ -28,37 +35,33 @@
   const smoothVal = $('smoothVal');
   const contrastVal = $('contrastVal');
   const speedVal = $('speedVal');
-  const meterFill = $('meterFill');
-  const meterEl = $('meter');
   const canvas = $('spectrogram');
   const axisCanvas = $('freqAxis');
-  const canvasWrap = $('canvasWrap');
   const overlay = $('overlay');
   const statusEl = $('status');
 
   const ctx = canvas.getContext('2d', { alpha: false });
   const axisCtx = axisCanvas.getContext('2d');
 
-  // ---- State ----
+  // ---- State (tunable fields seeded from DEFAULTS) ----
   const state = {
     audioCtx: null,
     analyser: null,
     source: null,
     stream: null,
     freqData: null,      // Float32Array (dB)
-    timeData: null,      // Uint8Array (waveform for level meter)
     running: false,
     paused: false,
     rafId: 0,
-    floor: -100,
-    ceil: -30,
-    speed: 2,
-    gamma: 0.9,
-    log: false,
-    colormap: 'viridis',
     lut: null,
-    fmin: 20,    // displayed min frequency (Hz)
-    fmax: 18000, // displayed max frequency (Hz)
+    floor: DEFAULTS.floor,
+    ceil: DEFAULTS.ceil,
+    speed: DEFAULTS.speed,
+    gamma: DEFAULTS.gamma,
+    log: DEFAULTS.log,
+    colormap: DEFAULTS.color,
+    fmin: DEFAULTS.fmin,  // displayed min frequency (Hz)
+    fmax: DEFAULTS.fmax,  // displayed max frequency (Hz)
   };
 
   // ---- Colormaps (piecewise-linear control points) ----
@@ -178,9 +181,6 @@
     state.rafId = requestAnimationFrame(draw);
     if (!state.running) return;
 
-    state.analyser.getByteTimeDomainData(state.timeData);
-    updateMeter();
-
     if (state.paused) return;
 
     state.analyser.getFloatFrequencyData(state.freqData);
@@ -232,21 +232,6 @@
     ctx.putImageData(col, w - speed, 0);
   }
 
-  function updateMeter() {
-    const td = state.timeData;
-    let sum = 0, peak = 0;
-    for (let i = 0; i < td.length; i++) {
-      const v = (td[i] - 128) / 128;
-      sum += v * v;
-      const a = Math.abs(v);
-      if (a > peak) peak = a;
-    }
-    const rms = Math.sqrt(sum / td.length);
-    meterFill.style.width = Math.min(100, rms * 140) + '%';
-    if (peak > 0.98) meterEl.classList.add('clip');
-    else meterEl.classList.remove('clip');
-  }
-
   // ---- Audio ----
   async function start() {
     try {
@@ -274,12 +259,10 @@
       state.running = true;
       state.paused = false;
       overlay.classList.add('hidden');
-      startBtn.textContent = 'Stop';
-      startBtn.classList.add('recording');
-      pauseBtn.disabled = false;
-      pauseBtn.textContent = 'Pause';
-      saveBtn.disabled = false;
+      renderPlay();
       deviceSelect.disabled = false;
+      // Collapse the panel so the user immediately sees the full spectrogram.
+      toggleControls(false);
 
       const nyquist = Math.round(state.audioCtx.sampleRate / 2);
       maxFreqInput.max = nyquist;
@@ -302,19 +285,25 @@
     if (state.rafId) { cancelAnimationFrame(state.rafId); state.rafId = 0; }
     if (state.source) { try { state.source.disconnect(); } catch (_) {} state.source = null; }
     if (state.stream) { state.stream.getTracks().forEach((t) => t.stop()); state.stream = null; }
-    startBtn.textContent = 'Start';
-    startBtn.classList.remove('recording');
-    pauseBtn.disabled = true;
-    meterFill.style.width = '0%';
-    meterEl.classList.remove('clip');
+    renderPlay();
     setStatus('Stopped.');
+  }
+
+  // Reflect audio state on the floating play/pause button: ⏸ while live,
+  // ▶ when idle or paused; red whenever the mic is running.
+  function renderPlay() {
+    const active = state.running && !state.paused;
+    playBtn.textContent = active ? '⏸' : '▶';
+    const label = !state.running ? 'Start' : state.paused ? 'Resume' : 'Pause';
+    playBtn.setAttribute('aria-label', label);
+    playBtn.title = label;
+    playBtn.classList.toggle('recording', state.running);
   }
 
   function applyFft() {
     if (!state.analyser) return;
     state.analyser.fftSize = parseInt(fftSelect.value, 10);
     state.freqData = new Float32Array(state.analyser.frequencyBinCount);
-    state.timeData = new Uint8Array(state.analyser.fftSize);
   }
 
   async function populateDevices() {
@@ -346,17 +335,16 @@
     return state.audioCtx;
   }
 
-  startBtn.addEventListener('click', () => {
-    if (state.running) { stop(); return; }
-    try { ensureAudioCtx(); } catch (_) { /* start() surfaces real failures */ }
-    start();
-  });
-
-  pauseBtn.addEventListener('click', () => {
-    if (!state.running) return;
+  // One button drives start + pause/resume; the mic stays live while paused.
+  playBtn.addEventListener('click', () => {
+    if (!state.running) {
+      try { ensureAudioCtx(); } catch (_) { /* start() surfaces real failures */ }
+      start();
+      return;
+    }
     state.paused = !state.paused;
-    pauseBtn.textContent = state.paused ? 'Resume' : 'Pause';
     setStatus(state.paused ? 'Paused (mic still live).' : 'Listening…');
+    renderPlay();
   });
 
   function clearCanvas() {
@@ -366,35 +354,16 @@
 
   clearBtn.addEventListener('click', clearCanvas);
 
-  saveBtn.addEventListener('click', () => {
-    try {
-      const url = canvas.toDataURL('image/png');
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `spectri-${new Date().toISOString().replace(/[:.]/g, '-')}.png`;
-      a.click();
-    } catch (err) { handleError(err); }
-  });
-
-  fullscreenBtn.addEventListener('click', () => {
-    if (document.fullscreenElement) {
-      document.exitFullscreen();
-    } else if (canvasWrap.requestFullscreen) {
-      canvasWrap.requestFullscreen();
-    }
-  });
-
-  // Show/hide the settings panel. On desktop the panel is inline so toggling it
-  // changes the stage height — resizeCanvas() reflows the canvas (and redraws
-  // the axis) while preserving the current image.
-  function toggleSettings(open) {
-    const next = open === undefined ? !document.body.classList.contains('settings-open') : open;
-    document.body.classList.toggle('settings-open', next);
-    settingsBtn.setAttribute('aria-expanded', next ? 'true' : 'false');
+  // Show/hide the controls drawer. The drawer is an overlay so the stage size
+  // doesn't change, but resizeCanvas() keeps the axis crisp across DPR changes.
+  function toggleControls(open) {
+    const next = open === undefined ? !document.body.classList.contains('controls-open') : open;
+    document.body.classList.toggle('controls-open', next);
+    menuBtn.setAttribute('aria-expanded', next ? 'true' : 'false');
     resizeCanvas();
   }
-  settingsBtn.addEventListener('click', () => toggleSettings());
-  settingsClose.addEventListener('click', () => toggleSettings(false));
+  menuBtn.addEventListener('click', () => toggleControls());
+  closeBtn.addEventListener('click', () => toggleControls(false));
 
   deviceSelect.addEventListener('change', () => {
     if (state.running) { stop(); start(); }
@@ -451,7 +420,6 @@
   });
 
   window.addEventListener('resize', resizeCanvas);
-  document.addEventListener('fullscreenchange', () => setTimeout(resizeCanvas, 50));
 
   // ---- Helpers ----
   function setStatus(msg, isError) {
@@ -463,7 +431,7 @@
     console.error(err);
     let msg = err && err.message ? err.message : String(err);
     if (err && (err.name === 'NotAllowedError' || err.name === 'SecurityError')) {
-      msg = 'Microphone access was denied. Allow it in your browser, then click Start again.';
+      msg = 'Microphone access was denied. Allow it in your browser, then tap ▶ again.';
     } else if (err && err.name === 'NotFoundError') {
       msg = 'No microphone found. Connect an input device and try again.';
     }
@@ -472,14 +440,9 @@
   }
 
   // ---- Init ----
-  // Browsers restore form-control values across refresh, which would desync the
-  // UI from `state`. Force every control back to its default on load so the
-  // chart always starts from the documented defaults.
-  const DEFAULTS = {
-    fft: '2048', color: 'viridis', log: false,
-    floor: -100, ceil: -30, smooth: 0.5, speed: 2, gamma: 0.9,
-    fmin: 20, fmax: 18000,
-  };
+  // The DOM controls ship without value attributes, so push every DEFAULT into
+  // both the inputs and `state` on load. (This also overrides any values a
+  // browser tries to restore across a refresh.)
   function initControls() {
     fftSelect.value = DEFAULTS.fft;
     colorSelect.value = DEFAULTS.color;
@@ -509,26 +472,16 @@
   }
 
   initControls();
+  renderPlay();
 
-  // Settings panel starts open on wide screens, collapsed on phones (where it
-  // is an overlay drawer that would otherwise cover the spectrogram).
-  if (window.matchMedia('(min-width: 641px)').matches) {
-    document.body.classList.add('settings-open');
-    settingsBtn.setAttribute('aria-expanded', 'true');
-  }
-
-  // iPhone Safari has no Fullscreen API for non-<video> elements, so the button
-  // would silently do nothing — hide it where it isn't supported.
-  if (!document.fullscreenEnabled && !document.webkitFullscreenEnabled) {
-    fullscreenBtn.hidden = true;
-  }
+  // Controls start hidden everywhere — only the floating buttons show.
 
   state.lut = buildLut(state.colormap);
   resizeCanvas();
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
     setStatus('This browser does not support microphone capture (getUserMedia).', true);
-    startBtn.disabled = true;
+    playBtn.disabled = true;
   } else {
-    setStatus('Ready. Click Start to begin.');
+    setStatus('Ready. Tap ▶ to begin.');
   }
 })();
