@@ -21,6 +21,7 @@ html, body {
 body {
   display: flex;
   flex-direction: column;
+  height: 100dvh; /* dvh tracks iOS dynamic browser chrome; height:100% above is the fallback */
   background: var(--bg);
   color: var(--text);
   font: 14px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
@@ -33,6 +34,8 @@ body {
   align-items: baseline;
   gap: 12px;
   padding: 10px 16px;
+  padding-left: max(16px, env(safe-area-inset-left));
+  padding-right: max(16px, env(safe-area-inset-right));
   border-bottom: 1px solid var(--border);
   background: var(--panel);
 }
@@ -47,16 +50,38 @@ body {
   font-size: 12px;
 }
 
-/* Toolbar */
-.toolbar {
+/* Primary bar — always visible: actions, level meter, settings toggle */
+.primary-bar {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 14px;
   padding: 10px 16px;
+  padding-left: max(16px, env(safe-area-inset-left));
+  padding-right: max(16px, env(safe-area-inset-right));
   background: var(--panel-2);
   border-bottom: 1px solid var(--border);
 }
+.settings-toggle { margin-left: auto; white-space: nowrap; }
+body.settings-open .settings-toggle { border-color: var(--accent); }
+
+/* Settings panel — collapsible. Inline (wrapping) on desktop, overlay drawer on mobile. */
+.settings-panel {
+  background: var(--panel-2);
+  border-bottom: 1px solid var(--border);
+}
+body:not(.settings-open) .settings-panel { display: none; }
+.settings-body {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 14px;
+  padding: 10px 16px;
+  padding-left: max(16px, env(safe-area-inset-left));
+  padding-right: max(16px, env(safe-area-inset-right));
+}
+/* The panel header (title + close) is only needed in the mobile drawer. */
+.settings-head { display: none; }
 .control-group {
   display: flex;
   flex-direction: column;
@@ -216,6 +241,58 @@ input[type="number"].num {
 .canvas-wrap:fullscreen .overlay { background: rgba(0,0,0,0.85); }
 
 @media (max-width: 640px) {
-  input[type="range"] { width: 90px; }
-  .meter, .meter-group { width: 90px; min-width: 70px; }
+  input[type="range"] { width: 100%; min-width: 140px; }
+  .meter { width: 100%; }
+  .meter-group { flex: 1 1 120px; min-width: 90px; }
+
+  /* iOS zooms the page when a focused field is < 16px; bump form controls. */
+  select, input[type="number"].num, .btn { font-size: 16px; }
+  .btn { padding: 10px 16px; } /* ~44px touch targets */
+
+  /* Settings becomes a scrollable overlay drawer so the spectrogram keeps
+     full height underneath. */
+  .settings-panel {
+    position: fixed;
+    left: 0;
+    right: 0;
+    top: 0;
+    bottom: 0;
+    z-index: 20;
+    overflow-y: auto;
+    border-bottom: none;
+    -webkit-overflow-scrolling: touch;
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  .settings-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    position: sticky;
+    top: 0;
+    padding: 12px 16px;
+    padding-left: max(16px, env(safe-area-inset-left));
+    padding-right: max(16px, env(safe-area-inset-right));
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+  }
+  .settings-title {
+    font-size: 13px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--muted);
+  }
+  .settings-close {
+    appearance: none;
+    border: 1px solid var(--border);
+    background: var(--panel-2);
+    color: var(--text);
+    width: 40px;
+    height: 40px;
+    border-radius: 8px;
+    font-size: 16px;
+    cursor: pointer;
+  }
+  /* Stack each control full-width so sliders are easy to drag. */
+  .settings-body { gap: 18px; }
+  .settings-body .control-group { width: 100%; }
 }

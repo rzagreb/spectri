@@ -10,6 +10,8 @@
   const clearBtn = $('clearBtn');
   const saveBtn = $('saveBtn');
   const fullscreenBtn = $('fullscreenBtn');
+  const settingsBtn = $('settingsBtn');
+  const settingsClose = $('settingsClose');
   const deviceSelect = $('deviceSelect');
   const fftSelect = $('fftSelect');
   const colorSelect = $('colorSelect');
@@ -258,10 +260,7 @@
       const stream = await navigator.mediaDevices.getUserMedia(constraints);
       state.stream = stream;
 
-      if (!state.audioCtx) {
-        const AC = window.AudioContext || window.webkitAudioContext;
-        state.audioCtx = new AC();
-      }
+      ensureAudioCtx();
       if (state.audioCtx.state === 'suspended') await state.audioCtx.resume();
 
       state.analyser = state.audioCtx.createAnalyser();
@@ -335,8 +334,22 @@
   }
 
   // ---- Controls ----
+  // Lazily create the shared AudioContext. iOS Safari only unlocks it from
+  // inside a user gesture, so we call this synchronously on the Start click
+  // (before any await) — once unlocked it stays usable for later starts.
+  function ensureAudioCtx() {
+    if (!state.audioCtx) {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      state.audioCtx = new AC();
+    }
+    if (state.audioCtx.state === 'suspended') state.audioCtx.resume();
+    return state.audioCtx;
+  }
+
   startBtn.addEventListener('click', () => {
-    if (state.running) stop(); else start();
+    if (state.running) { stop(); return; }
+    try { ensureAudioCtx(); } catch (_) { /* start() surfaces real failures */ }
+    start();
   });
 
   pauseBtn.addEventListener('click', () => {
@@ -370,6 +383,18 @@
       canvasWrap.requestFullscreen();
     }
   });
+
+  // Show/hide the settings panel. On desktop the panel is inline so toggling it
+  // changes the stage height — resizeCanvas() reflows the canvas (and redraws
+  // the axis) while preserving the current image.
+  function toggleSettings(open) {
+    const next = open === undefined ? !document.body.classList.contains('settings-open') : open;
+    document.body.classList.toggle('settings-open', next);
+    settingsBtn.setAttribute('aria-expanded', next ? 'true' : 'false');
+    resizeCanvas();
+  }
+  settingsBtn.addEventListener('click', () => toggleSettings());
+  settingsClose.addEventListener('click', () => toggleSettings(false));
 
   deviceSelect.addEventListener('change', () => {
     if (state.running) { stop(); start(); }
@@ -484,6 +509,20 @@
   }
 
   initControls();
+
+  // Settings panel starts open on wide screens, collapsed on phones (where it
+  // is an overlay drawer that would otherwise cover the spectrogram).
+  if (window.matchMedia('(min-width: 641px)').matches) {
+    document.body.classList.add('settings-open');
+    settingsBtn.setAttribute('aria-expanded', 'true');
+  }
+
+  // iPhone Safari has no Fullscreen API for non-<video> elements, so the button
+  // would silently do nothing — hide it where it isn't supported.
+  if (!document.fullscreenEnabled && !document.webkitFullscreenEnabled) {
+    fullscreenBtn.hidden = true;
+  }
+
   state.lut = buildLut(state.colormap);
   resizeCanvas();
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
