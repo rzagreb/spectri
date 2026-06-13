@@ -110,6 +110,34 @@
     return lut;
   }
 
+  // ---- Rainbow mode: hard frequency zones, each its own colour ----
+  // [hiHz, r, g, b]; the last zone catches everything up to Nyquist, the
+  // first everything below 150 Hz, so the visible range is always coloured.
+  const RAINBOW_BANDS = [
+    [150, 220, 50, 50],       // 100 Hz  red
+    [350, 240, 130, 35],      // 200 Hz  orange
+    [750, 235, 210, 45],      // 500 Hz  yellow
+    [1500, 70, 200, 90],      // 1 kHz   green
+    [3500, 40, 200, 200],     // 2 kHz   cyan
+    [7500, 60, 110, 235],     // 5 kHz   blue
+    [Infinity, 165, 80, 225], // 10 kHz  violet
+  ];
+  function buildBandLut(r, g, b) {
+    const lut = new Uint8ClampedArray(256 * 3);
+    for (let i = 0; i < 256; i++) {
+      const t = i / 255;
+      lut[i * 3] = r * t; lut[i * 3 + 1] = g * t; lut[i * 3 + 2] = b * t;
+    }
+    return lut;
+  }
+  const RAINBOW_LUTS = RAINBOW_BANDS.map((b) => buildBandLut(b[1], b[2], b[3]));
+  function rainbowLutForFreq(freq) {
+    for (let i = 0; i < RAINBOW_BANDS.length; i++) {
+      if (freq < RAINBOW_BANDS[i][0]) return RAINBOW_LUTS[i];
+    }
+    return RAINBOW_LUTS[RAINBOW_LUTS.length - 1];
+  }
+
   // ---- Canvas sizing (devicePixelRatio aware) ----
   function resizeCanvas() {
     const dpr = window.devicePixelRatio || 1;
@@ -141,6 +169,15 @@
     if (state.log) fmin = Math.max(fmin, 1);
     if (fmin >= fmax) fmin = Math.max(state.log ? 1 : 0, fmax - 1);
     return { fmin, fmax };
+  }
+
+  // ---- EQ band mode: 10 standard octave bands (edges at center·2^±0.5) ----
+  const EQ_CENTERS = [31.5, 63, 125, 250, 500, 1000, 2000, 4000, 8000, 16000];
+
+  // Centers that fall inside the displayed [fmin, fmax] range.
+  function eqBands(nyquist) {
+    const { fmin, fmax } = freqRange(nyquist);
+    return EQ_CENTERS.filter((c) => c >= fmin && c <= fmax);
   }
 
   // ---- Frequency axis labels ----
@@ -179,6 +216,27 @@
       }
       return h - ((freq - fmin) / (fmax - fmin)) * h;
     };
+
+    if (state.mode === 'bands') {
+      const centers = eqBands(nyquist);
+      const nBands = centers.length;
+      if (!nBands) return; // nothing displayed: blank panel
+      for (let i = 0; i <= nBands; i++) { // tick at every stripe boundary
+        const y = Math.min(Math.round((i * h) / nBands), h - 1) + 0.5;
+        axisCtx.beginPath();
+        axisCtx.moveTo(w - 5 * dpr, y);
+        axisCtx.lineTo(w, y);
+        axisCtx.stroke();
+      }
+      for (let k = 0; k < nBands; k++) { // center label per stripe
+        const slot = nBands - 1 - k;
+        const y = Math.round(((slot + 0.5) * h) / nBands);
+        const c = centers[k];
+        // floor() keeps 31.5 printing as the conventional "31".
+        axisCtx.fillText(label(c < 100 ? Math.floor(c) : c), w - 7 * dpr, y);
+      }
+      return;
+    }
 
     let ticks;
     if (state.log) {
@@ -232,6 +290,39 @@
     // Scroll existing content left by `cols` device pixels.
     if (cols < w) ctx.drawImage(canvas, cols, 0, w - cols, h, 0, 0, w - cols, h);
 
+    if (state.mode === 'bands') {
+      // EQ bands: one solid stripe per octave band. The black pre-fill is
+      // both the separator gaps and the fallback when no band fits the range.
+      const centers = eqBands(nyquist);
+      const nBands = centers.length;
+      const x = w - cols;
+      ctx.fillStyle = '#000';
+      ctx.fillRect(x, 0, cols, h);
+      const maxBin = binCount - 1;
+      const SEP = 2; // device px dark gap below each stripe boundary
+      for (let k = 0; k < nBands; k++) { // k=0 = lowest band
+        const cHz = centers[k];
+        let b0 = Math.round((cHz / Math.SQRT2 / nyquist) * maxBin);
+        let b1 = Math.round((Math.min(cHz * Math.SQRT2, nyquist) / nyquist) * maxBin);
+        if (b0 < 0) b0 = 0;
+        if (b1 > maxBin) b1 = maxBin;
+        if (b1 < b0) b1 = b0; // band narrower than one bin: nearest-bin read
+        // Max-pool the band's bins so narrow peaks keep the stripe lit.
+        let db = -Infinity;
+        for (let b = b0; b <= b1; b++) if (state.freqData[b] > db) db = state.freqData[b];
+        let n = (db - state.floor) / range;
+        if (n < 0) n = 0; else if (n > 1) n = 1;
+        n = Math.pow(n, state.gamma);
+        const li = (n * 255) | 0;
+        ctx.fillStyle = `rgb(${lut[li * 3]},${lut[li * 3 + 1]},${lut[li * 3 + 2]})`;
+        const slot = nBands - 1 - k; // bottom = lowest frequency
+        const yTop = Math.round((slot * h) / nBands);
+        const yBot = Math.round(((slot + 1) * h) / nBands);
+        ctx.fillRect(x, yTop + SEP, cols, yBot - yTop - SEP);
+      }
+      return;
+    }
+
     // Build the newest column (height h), then stamp it `cols` px wide.
     const col = ctx.createImageData(cols, h);
     const data = col.data;
@@ -250,6 +341,19 @@
       let binF = (freq / nyquist) * maxBin;
       if (binF < 0) binF = 0; else if (binF > maxBin) binF = maxBin;
       edges[y] = binF;
+    }
+
+    // Rainbow mode: pick each row's palette by its true frequency, so the
+    // hue zones track the Log toggle and fmin/fmax exactly.
+    const rainbow = state.mode === 'rainbow';
+    let rowLut = null;
+    if (rainbow) {
+      rowLut = new Array(h);
+      for (let y = 0; y < h; y++) {
+        const frac = 1 - y / (h - 1 || 1);
+        const freq = state.log ? fmin * Math.exp(frac * logDen) : fmin + frac * linSpan;
+        rowLut[y] = rainbowLutForFreq(freq);
+      }
     }
 
     for (let y = 0; y < h; y++) {
@@ -276,7 +380,8 @@
       // signal bright, giving a crisper image (gamma=1 is the linear mapping).
       n = Math.pow(n, state.gamma);
       const li = (n * 255) | 0;
-      const r = lut[li * 3], g = lut[li * 3 + 1], b = lut[li * 3 + 2];
+      const rl = rainbow ? rowLut[y] : lut;
+      const r = rl[li * 3], g = rl[li * 3 + 1], b = rl[li * 3 + 2];
 
       for (let x = 0; x < cols; x++) {
         const p = (y * cols + x) * 4;
