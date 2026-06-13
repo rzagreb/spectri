@@ -926,25 +926,38 @@
     return node;
   }
 
-  function playSelection() {
-    if (!state.sel || !state.recording) return;
+  // Guards the async render window so a fast double-tap can't start two
+  // overlapping sources (the old synchronous path couldn't overlap).
+  let preparingPlayback = false;
+
+  async function playSelection() {
+    if (!state.sel || !state.recording || preparingPlayback) return;
     stopSelectionPlayback();
     ensureAudioCtx();
     if (state.audioCtx.state === 'suspended') state.audioCtx.resume();
-    const { t0, t1, fLo, fHi } = state.sel;
+    const sel = state.sel;
+    // Render + normalize the slice before playing (the buffer IS the time
+    // clip, so it plays from 0). audioCtx is already unlocked here — the
+    // playback bar only appears after a recording — so awaiting is safe.
+    let buf;
+    preparingPlayback = true;
+    try { buf = await isolatedBuffer(sel); }
+    catch (err) { preparingPlayback = false; handleError(err); return; }
+    preparingPlayback = false;
+    if (state.sel !== sel) return; // selection changed/cleared during render
     const src = state.audioCtx.createBufferSource();
-    src.buffer = state.recording;
-    buildBandChain(state.audioCtx, src, fLo, fHi).connect(state.audioCtx.destination);
+    src.buffer = buf;
+    src.connect(state.audioCtx.destination);
 
     const loop = loopChk.checked;
-    const dur = Math.max(0.01, t1 - t0);
-    if (loop) { src.loop = true; src.loopStart = t0; src.loopEnd = t1; src.start(0, t0); }
-    else src.start(0, t0, dur);
+    const dur = buf.duration;
+    src.loop = loop;
+    src.start(0);
     state.playSource = src;
 
     // Sweep a cursor across the selection in lockstep with audioCtx time.
     const startAt = state.audioCtx.currentTime;
-    const x0 = state.sel.x0, x1 = state.sel.x1;
+    const x0 = sel.x0, x1 = sel.x1;
     const sweep = () => {
       const el = state.audioCtx.currentTime - startAt;
       if (!loop && el >= dur) { stopSelectionPlayback(); return; }
@@ -1000,6 +1013,49 @@
     return offline.startRendering();
   }
 
+  // ---- Isolated-band loudness (auto makeup gain) ----
+  // A thin selection keeps only a sliver of the signal's energy, so the raw
+  // filtered output sits far below full scale — often inaudible for high/low
+  // bands even at max system volume (the visual path already self-normalizes
+  // via the dB floor/ceil, so a band can look bright yet sound silent). We
+  // peak-normalize the rendered slice to a fixed target, capping the boost so a
+  // near-silent selection doesn't blast amplified noise. The result is cached
+  // on the selection so Play band and Save WAV stay bit-identical.
+  const NORM_TARGET = 0.97;  // peak we normalize to (just under full scale)
+  const NORM_MAX_GAIN = 56;  // ~+35 dB ceiling on the makeup boost
+
+  function bufferPeak(buf) {
+    let peak = 0;
+    for (let c = 0; c < buf.numberOfChannels; c++) {
+      const d = buf.getChannelData(c);
+      for (let i = 0; i < d.length; i++) { const a = Math.abs(d[i]); if (a > peak) peak = a; }
+    }
+    return peak;
+  }
+
+  // Scale the buffer in place toward NORM_TARGET. Scaling down (g<1) also keeps
+  // the WAV from clipping; audioBufferToWav clamps as a final backstop.
+  function normalizeBuffer(buf) {
+    const peak = bufferPeak(buf);
+    if (peak <= 0) return;
+    const g = Math.min(NORM_MAX_GAIN, NORM_TARGET / peak);
+    if (Math.abs(g - 1) < 1e-3) return;
+    for (let c = 0; c < buf.numberOfChannels; c++) {
+      const d = buf.getChannelData(c);
+      for (let i = 0; i < d.length; i++) d[i] *= g;
+    }
+  }
+
+  // Render the selection through the band filters once, normalized, cached on
+  // it. `refreshStatic` clears `_iso` when the freq mapping (fLo/fHi) changes.
+  async function isolatedBuffer(sel) {
+    if (sel._iso) return sel._iso;
+    const buf = await renderSelectionBuffer(sel);
+    normalizeBuffer(buf);
+    sel._iso = buf;
+    return buf;
+  }
+
   function audioBufferToWav(buf) {
     const numCh = buf.numberOfChannels, len = buf.length, rate = buf.sampleRate;
     const blockAlign = numCh * 2;            // 16-bit samples
@@ -1039,7 +1095,7 @@
     saveBandBtn.disabled = true;
     setStatus('Rendering WAV…');
     try {
-      const out = await renderSelectionBuffer(state.sel);
+      const out = await isolatedBuffer(state.sel); // normalized; matches playback
       const { fLo, fHi } = state.sel;
       downloadBlob(audioBufferToWav(out), `spectri_${Math.round(fLo)}-${Math.round(fHi)}Hz.wav`);
       setStatus('Saved WAV.');
@@ -1257,6 +1313,7 @@
       const hCss = selCanvas.getBoundingClientRect().height;
       state.sel.fHi = freqAtY(state.sel.y0, hCss);
       state.sel.fLo = freqAtY(state.sel.y1, hCss);
+      state.sel._iso = null; // band changed → cached isolated audio is stale
       selInfo.textContent = `${Math.round(state.sel.fLo)}–${Math.round(state.sel.fHi)} Hz · ${state.sel.t0.toFixed(2)}–${state.sel.t1.toFixed(2)} s`;
     }
     renderStaticSpectrogram();
