@@ -13,6 +13,50 @@
     fmin: 20, fmax: 15000, mode: 'rainbow',
   };
 
+  // ---- URL query params (deep-linkable settings) ----
+  // Param names mirror the DEFAULTS keys, so `?mode=galaxy&floor=-100&fmin=100`
+  // overrides those settings on load. Each key is validated against the same
+  // option sets / slider bounds the controls use; unknown keys and invalid
+  // values are ignored so a typo never breaks the page.
+  const PARAM_SPEC = {
+    mode:   { kind: 'enum', values: ['classic', 'galaxy', 'bands', 'rainbow'] },
+    fft:    { kind: 'enum', values: ['512', '1024', '2048', '4096', '8192'] },
+    color:  { kind: 'enum', values: ['viridis', 'magma', 'inferno', 'jet', 'grayscale'] },
+    log:    { kind: 'bool' },
+    fmin:   { kind: 'num', min: 0 },
+    fmax:   { kind: 'num', min: 10 },
+    floor:  { kind: 'num', min: -120, max: -20 },
+    ceil:   { kind: 'num', min: -60, max: 0 },
+    smooth: { kind: 'num', min: 0, max: 0.95 },
+    gamma:  { kind: 'num', min: 0.6, max: 4 },
+    speed:  { kind: 'int', min: 1, max: 8 },
+  };
+
+  function readUrlParams() {
+    const q = new URLSearchParams(location.search);
+    const out = {};
+    for (const [key, spec] of Object.entries(PARAM_SPEC)) {
+      if (!q.has(key)) continue;
+      const raw = q.get(key);
+      if (spec.kind === 'enum') {
+        if (spec.values.includes(raw)) out[key] = raw;
+      } else if (spec.kind === 'bool') {
+        if (/^(1|true)$/i.test(raw)) out[key] = true;
+        else if (/^(0|false)$/i.test(raw)) out[key] = false;
+      } else { // num | int
+        let v = spec.kind === 'int' ? parseInt(raw, 10) : parseFloat(raw);
+        if (!isFinite(v)) continue;
+        if (spec.min != null) v = Math.max(spec.min, v);
+        if (spec.max != null) v = Math.min(spec.max, v);
+        out[key] = v;
+      }
+    }
+    return out;
+  }
+
+  // Effective settings: built-in defaults overridden by any valid URL params.
+  const SETTINGS = { ...DEFAULTS, ...readUrlParams() };
+
   // ---- DOM ----
   const $ = (id) => document.getElementById(id);
   const playBtn = $('playBtn');
@@ -1319,33 +1363,33 @@
   // both the inputs and `state` on load. (This also overrides any values a
   // browser tries to restore across a refresh.)
   function initControls() {
-    fftSelect.value = DEFAULTS.fft;
-    colorSelect.value = DEFAULTS.color;
-    logToggle.checked = DEFAULTS.log;
-    modeSelect.value = DEFAULTS.mode;
-    minFreqInput.value = DEFAULTS.fmin;
-    maxFreqInput.value = DEFAULTS.fmax;
-    floorRange.value = DEFAULTS.floor;
-    ceilRange.value = DEFAULTS.ceil;
-    smoothRange.value = DEFAULTS.smooth;
-    contrastRange.value = DEFAULTS.gamma;
-    speedRange.value = DEFAULTS.speed;
+    fftSelect.value = SETTINGS.fft;
+    colorSelect.value = SETTINGS.color;
+    logToggle.checked = SETTINGS.log;
+    modeSelect.value = SETTINGS.mode;
+    minFreqInput.value = SETTINGS.fmin;
+    maxFreqInput.value = SETTINGS.fmax;
+    floorRange.value = SETTINGS.floor;
+    ceilRange.value = SETTINGS.ceil;
+    smoothRange.value = SETTINGS.smooth;
+    contrastRange.value = SETTINGS.gamma;
+    speedRange.value = SETTINGS.speed;
 
-    state.log = DEFAULTS.log;
-    state.mode = DEFAULTS.mode;
-    state.colormap = DEFAULTS.color;
-    state.floor = DEFAULTS.floor;
-    state.ceil = DEFAULTS.ceil;
-    state.speed = DEFAULTS.speed;
-    state.gamma = DEFAULTS.gamma;
-    state.fmin = DEFAULTS.fmin;
-    state.fmax = DEFAULTS.fmax;
+    state.log = SETTINGS.log;
+    state.mode = SETTINGS.mode;
+    state.colormap = SETTINGS.color;
+    state.floor = SETTINGS.floor;
+    state.ceil = SETTINGS.ceil;
+    state.speed = SETTINGS.speed;
+    state.gamma = SETTINGS.gamma;
+    state.fmin = SETTINGS.fmin;
+    state.fmax = SETTINGS.fmax;
 
-    floorVal.textContent = DEFAULTS.floor;
-    ceilVal.textContent = DEFAULTS.ceil;
-    smoothVal.textContent = DEFAULTS.smooth.toFixed(2);
-    contrastVal.textContent = DEFAULTS.gamma.toFixed(1);
-    speedVal.textContent = DEFAULTS.speed;
+    floorVal.textContent = SETTINGS.floor;
+    ceilVal.textContent = SETTINGS.ceil;
+    smoothVal.textContent = SETTINGS.smooth.toFixed(2);
+    contrastVal.textContent = SETTINGS.gamma.toFixed(1);
+    speedVal.textContent = SETTINGS.speed;
   }
 
   initControls();
