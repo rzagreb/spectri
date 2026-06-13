@@ -8,9 +8,9 @@
   // attributes — `initControls()` writes these into both the inputs and `state`
   // on load, so changing a default only ever needs an edit in this object.
   const DEFAULTS = {
-    fft: '4096', color: 'jet', log: false,
-    floor: -95, ceil: -40, smooth: 0.2, speed: 2, gamma: 1.4,
-    fmin: 20, fmax: 5000, mode: 'classic',
+    fft: '4096', color: 'jet', log: true,
+    floor: -92, ceil: -60, smooth: 0.05, speed: 2, gamma: 0.6,
+    fmin: 20, fmax: 15000, mode: 'rainbow',
   };
 
   // ---- DOM ----
@@ -22,6 +22,7 @@
   const deviceSelect = $('deviceSelect');
   const fftSelect = $('fftSelect');
   const colorSelect = $('colorSelect');
+  const colorGroup = $('colorGroup');
   const logToggle = $('logToggle');
   const modeSelect = $('modeSelect');
   const immersiveBtn = $('immersiveBtn');
@@ -761,10 +762,17 @@
     drawAxis();
   });
 
+  // Rainbow draws its own per-zone palette, so the global Colors picker has
+  // no effect there — hide it to keep the panel honest.
+  function syncModeControls() {
+    colorGroup.style.display = state.mode === 'rainbow' ? 'none' : '';
+  }
+
   modeSelect.addEventListener('change', () => {
     state.mode = modeSelect.value;
     clearCanvas();
     state.acc = 0; // classic scroll accumulator: no burst when switching back
+    syncModeControls();
     drawAxis();
   });
 
@@ -862,6 +870,7 @@
   }
 
   initControls();
+  syncModeControls();
   renderPlay();
 
   // Controls start hidden everywhere — only the floating buttons show.
