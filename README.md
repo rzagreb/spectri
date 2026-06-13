@@ -8,6 +8,9 @@ A lightweight, standalone browser spectrogram visualizer for live microphone aud
 
 - Live microphone
 - Scrolling spectrogram
+- Record & replay: capture a session, then drag a box on the static spectrogram
+  to isolate a time × frequency region and hear just that band (highpass+lowpass
+  filtering), with a sweeping playback cursor
 - Controlls:
   - Start/Stop, Pause/Resume
   - FFT size: 256, 512, 1024, 2048, 4096

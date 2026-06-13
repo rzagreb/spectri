@@ -11,6 +11,8 @@
   <div class="fab">
     <button id="playBtn" class="fab-btn" type="button"
       aria-label="Start" title="Start">▶</button>
+    <button id="recordBtn" class="fab-btn" type="button"
+      aria-label="Record" title="Record this session, then replay & isolate frequencies">●</button>
     <button id="immersiveBtn" class="fab-btn" type="button"
       aria-label="Immersive view" title="Immersive view — hide UI (Esc to exit)">⛶</button>
     <button id="menuBtn" class="fab-btn" type="button"
@@ -117,11 +119,21 @@
     <canvas id="freqAxis" class="freq-axis" aria-hidden="true"></canvas>
     <div class="canvas-wrap" id="canvasWrap">
       <canvas id="spectrogram"></canvas>
+      <canvas id="selCanvas" class="sel-canvas" aria-hidden="true"></canvas>
       <div class="overlay" id="overlay">
         <p>Tap <strong>▶</strong> and allow microphone access to begin.</p>
       </div>
     </div>
   </main>
+
+  <!-- Playback toolbar — only visible after a recording is captured. -->
+  <div class="playback-bar" id="playbackBar" hidden>
+    <span class="pb-hint">Drag a box on the spectrogram to isolate a band, then:</span>
+    <button id="playBandBtn" class="btn btn-primary" type="button" disabled>▶ Play band</button>
+    <label class="checkbox"><input type="checkbox" id="loopChk" /> Loop</label>
+    <span id="selInfo" class="sel-info"></span>
+    <button id="backLiveBtn" class="btn" type="button">Back to live</button>
+  </div>
 
   <div class="status" id="status" role="status" aria-live="polite"></div>
 

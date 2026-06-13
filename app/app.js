@@ -9,13 +9,14 @@
   // on load, so changing a default only ever needs an edit in this object.
   const DEFAULTS = {
     fft: '4096', color: 'jet', log: true,
-    floor: -92, ceil: -60, smooth: 0.05, speed: 2, gamma: 0.6,
+    floor: -95, ceil: -60, smooth: 0.05, speed: 2, gamma: 0.6,
     fmin: 20, fmax: 15000, mode: 'rainbow',
   };
 
   // ---- DOM ----
   const $ = (id) => document.getElementById(id);
   const playBtn = $('playBtn');
+  const recordBtn = $('recordBtn');
   const clearBtn = $('clearBtn');
   const menuBtn = $('menuBtn');
   const closeBtn = $('closeBtn');
@@ -39,11 +40,18 @@
   const contrastVal = $('contrastVal');
   const speedVal = $('speedVal');
   const canvas = $('spectrogram');
+  const selCanvas = $('selCanvas');
   const axisCanvas = $('freqAxis');
   const overlay = $('overlay');
   const statusEl = $('status');
+  const playbackBar = $('playbackBar');
+  const playBandBtn = $('playBandBtn');
+  const loopChk = $('loopChk');
+  const selInfo = $('selInfo');
+  const backLiveBtn = $('backLiveBtn');
 
   const ctx = canvas.getContext('2d', { alpha: false });
+  const selCtx = selCanvas.getContext('2d');
   const axisCtx = axisCanvas.getContext('2d');
 
   // ---- State (tunable fields seeded from DEFAULTS) ----
@@ -68,6 +76,17 @@
     fmin: DEFAULTS.fmin,  // displayed min frequency (Hz)
     fmax: DEFAULTS.fmax,  // displayed max frequency (Hz)
     mode: DEFAULTS.mode,  // 'classic' (scrolling spectrogram) | 'galaxy' (art)
+
+    // ---- Record & playback ----
+    view: 'live',        // 'live' (scrolling mic) | 'playback' (static recording)
+    recorder: null,      // MediaRecorder capturing the live stream
+    recChunks: null,     // Array<Blob> collected while recording
+    recActive: false,    // currently capturing
+    recording: null,     // decoded AudioBuffer of the last take
+    recDuration: 0,      // recording length (s)
+    sel: null,           // {x0,x1,y0,y1 css px; t0,t1 s; fLo,fHi Hz}
+    playSource: null,    // AudioBufferSourceNode currently sounding
+    playRafId: 0,        // cursor-sweep animation handle
   };
 
   // ---- Art mode runtime (radial galaxy) ----
@@ -145,7 +164,8 @@
     const rect = canvas.getBoundingClientRect();
     const w = Math.max(1, Math.round(rect.width * dpr));
     const h = Math.max(1, Math.round(rect.height * dpr));
-    if (canvas.width !== w || canvas.height !== h) {
+    const sized = canvas.width !== w || canvas.height !== h;
+    if (sized) {
       // Preserve existing content on resize by copying old image.
       const old = canvas.width && canvas.height
         ? ctx.getImageData(0, 0, canvas.width, canvas.height) : null;
@@ -157,10 +177,16 @@
       ctx.fillRect(0, 0, w, h);
       if (old) ctx.putImageData(old, 0, 0);
     }
+    // Keep the selection overlay matched to the spectrogram backing store.
+    if (selCanvas.width !== w || selCanvas.height !== h) {
+      selCanvas.width = w; selCanvas.height = h;
+    }
     const arect = axisCanvas.getBoundingClientRect();
     axisCanvas.width = Math.max(1, Math.round(arect.width * dpr));
     axisCanvas.height = Math.max(1, Math.round(arect.height * dpr));
     drawAxis();
+    // A resized backing store means the static recording must be repainted.
+    if (sized && state.view === 'playback') renderStaticSpectrogram();
   }
 
   // ---- Frequency range (clamped to Nyquist; log needs fmin >= 1 Hz) ----
@@ -264,6 +290,7 @@
   // displays instead of scrolling twice as fast on ProMotion screens.
   function draw(now) {
     state.rafId = requestAnimationFrame(draw);
+    if (state.view === 'playback') { state.lastT = 0; return; }
     if (!state.running || state.paused) { state.lastT = 0; return; }
     if (!state.lastT) { state.lastT = now; state.acc = 0; return; }
 
@@ -326,29 +353,33 @@
 
     // Build the newest column (height h), then stamp it `cols` px wide.
     const col = ctx.createImageData(cols, h);
-    const data = col.data;
+    const layout = computeRowLayout(h, nyquist, binCount);
+    paintColumn(col.data, cols, 0, cols, h, state.freqData, layout);
+    ctx.putImageData(col, w - cols, 0);
+  }
+
+  // ---- Shared column painting (live scroll + static recording render) ----
+  // Precompute, for the current freq range / log toggle, the FFT-bin index at
+  // every pixel-row boundary and (in rainbow mode) the per-row palette. Both
+  // the live draw loop and the static spectrogram renderer reuse this so their
+  // frequency→pixel mapping is guaranteed identical.
+  function computeRowLayout(h, nyquist, binCount) {
     const { fmin, fmax } = freqRange(nyquist);
     const logDen = Math.log(fmax / fmin);
     const linSpan = fmax - fmin;
     const maxBin = binCount - 1;
-
-    // FFT bin index at every pixel-row boundary; row y covers
-    // edges[y] (top, higher frequency) down to edges[y+1].
+    // row y covers edges[y] (top, higher frequency) down to edges[y+1].
     const edges = new Float32Array(h + 1);
     for (let y = 0; y <= h; y++) {
-      // y=0 is top → highest displayed frequency.
-      const frac = 1 - (y - 0.5) / (h - 1 || 1);
+      const frac = 1 - (y - 0.5) / (h - 1 || 1); // y=0 is top → highest freq
       const freq = state.log ? fmin * Math.exp(frac * logDen) : fmin + frac * linSpan;
       let binF = (freq / nyquist) * maxBin;
       if (binF < 0) binF = 0; else if (binF > maxBin) binF = maxBin;
       edges[y] = binF;
     }
-
-    // Rainbow mode: pick each row's palette by its true frequency, so the
-    // hue zones track the Log toggle and fmin/fmax exactly.
-    const rainbow = state.mode === 'rainbow';
+    // Rainbow mode tints each row by its true frequency, tracking Log + range.
     let rowLut = null;
-    if (rainbow) {
+    if (state.mode === 'rainbow') {
       rowLut = new Array(h);
       for (let y = 0; y < h; y++) {
         const frac = 1 - y / (h - 1 || 1);
@@ -356,7 +387,15 @@
         rowLut[y] = rainbowLutForFreq(freq);
       }
     }
+    return { edges, rowLut, maxBin };
+  }
 
+  // Paint columns [x, x+cols) of an ImageData buffer (row stride `stride` px)
+  // from a per-bin dB array, applying floor/ceil, contrast and the colormap.
+  function paintColumn(data, stride, x, cols, h, dbArr, layout) {
+    const { edges, rowLut, maxBin } = layout;
+    const range = (state.ceil - state.floor) || 1;
+    const lut = state.lut;
     for (let y = 0; y < h; y++) {
       const hiBin = edges[y], loBin = edges[y + 1];
       const b0 = Math.ceil(loBin), b1 = Math.floor(hiBin);
@@ -365,7 +404,7 @@
         // Several bins land on this row: keep the strongest so narrow peaks
         // stay sharp instead of being sampled away (max-pooling).
         db = -Infinity;
-        for (let b = b0; b <= b1; b++) if (state.freqData[b] > db) db = state.freqData[b];
+        for (let b = b0; b <= b1; b++) if (dbArr[b] > db) db = dbArr[b];
       } else {
         // Row sits between bins: interpolate the two neighbours so sparse
         // low-frequency bins render as smooth gradients instead of blocky bands.
@@ -373,7 +412,7 @@
         const lo = c | 0;
         const hi = lo < maxBin ? lo + 1 : lo;
         const t = c - lo;
-        db = state.freqData[lo] * (1 - t) + state.freqData[hi] * t;
+        db = dbArr[lo] * (1 - t) + dbArr[hi] * t;
       }
       let n = (db - state.floor) / range;
       if (n < 0) n = 0; else if (n > 1) n = 1;
@@ -381,15 +420,13 @@
       // signal bright, giving a crisper image (gamma=1 is the linear mapping).
       n = Math.pow(n, state.gamma);
       const li = (n * 255) | 0;
-      const rl = rainbow ? rowLut[y] : lut;
+      const rl = rowLut ? rowLut[y] : lut;
       const r = rl[li * 3], g = rl[li * 3 + 1], b = rl[li * 3 + 2];
-
-      for (let x = 0; x < cols; x++) {
-        const p = (y * cols + x) * 4;
+      for (let xi = 0; xi < cols; xi++) {
+        const p = (y * stride + x + xi) * 4;
         data[p] = r; data[p + 1] = g; data[p + 2] = b; data[p + 3] = 255;
       }
     }
-    ctx.putImageData(col, w - cols, 0);
   }
 
   // ---- Art mode: radial galaxy ----
@@ -583,6 +620,297 @@
     art.back = src;
   }
 
+  // ============================================================
+  //  Record → replay → isolate a frequency band
+  // ============================================================
+
+  // ---- Minimal FFT (radix-2, in-place) ----
+  // The live path uses an AnalyserNode, but that can't batch-process a finished
+  // recording, so we bring our own transform. Iterative Cooley–Tukey on
+  // separate real/imag arrays; `n` must be a power of two (it always is — it's
+  // the chosen FFT size). No dependencies, in keeping with the project.
+  function fftRadix2(re, im) {
+    const n = re.length;
+    for (let i = 1, j = 0; i < n; i++) { // bit-reversal permutation
+      let bit = n >> 1;
+      for (; j & bit; bit >>= 1) j ^= bit;
+      j ^= bit;
+      if (i < j) {
+        let t = re[i]; re[i] = re[j]; re[j] = t;
+        t = im[i]; im[i] = im[j]; im[j] = t;
+      }
+    }
+    for (let len = 2; len <= n; len <<= 1) {
+      const ang = -2 * Math.PI / len;
+      const wr = Math.cos(ang), wi = Math.sin(ang);
+      const half = len >> 1;
+      for (let i = 0; i < n; i += len) {
+        let cr = 1, ci = 0;
+        for (let k = 0; k < half; k++) {
+          const ar = re[i + k], ai = im[i + k];
+          const br = re[i + k + half], bi = im[i + k + half];
+          const tr = br * cr - bi * ci, ti = br * ci + bi * cr;
+          re[i + k] = ar + tr; im[i + k] = ai + ti;
+          re[i + k + half] = ar - tr; im[i + k + half] = ai - ti;
+          const ncr = cr * wr - ci * wi; ci = cr * wi + ci * wr; cr = ncr;
+        }
+      }
+    }
+  }
+
+  // Hann window (suppresses spectral leakage), cached by size.
+  let hannCache = null;
+  function hannWindow(n) {
+    if (hannCache && hannCache.length === n) return hannCache;
+    const w = new Float32Array(n);
+    for (let i = 0; i < n; i++) w[i] = 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / (n - 1));
+    hannCache = w;
+    return w;
+  }
+
+  // Mix an AudioBuffer down to one mono Float32Array.
+  function mixMono(buf) {
+    const ch = buf.numberOfChannels;
+    if (ch === 1) return buf.getChannelData(0);
+    const out = new Float32Array(buf.length);
+    for (let c = 0; c < ch; c++) {
+      const d = buf.getChannelData(c);
+      for (let i = 0; i < buf.length; i++) out[i] += d[i];
+    }
+    for (let i = 0; i < out.length; i++) out[i] /= ch;
+    return out;
+  }
+
+  // ---- Static spectrogram of the whole recording ----
+  // One STFT column per canvas x-pixel, painted with the same row mapping and
+  // colormap as the live view (computeRowLayout / paintColumn). Galaxy/EQ modes
+  // fall back to a classic render here — a 2D box only makes sense on a normal
+  // time×frequency image.
+  function renderStaticSpectrogram() {
+    if (state.view !== 'playback' || !state.recording || !state.audioCtx) return;
+    const W = canvas.width, h = canvas.height;
+    const N = parseInt(fftSelect.value, 10);
+    const binCount = N >> 1;
+    const nyquist = state.audioCtx.sampleRate / 2;
+    const mono = mixMono(state.recording);
+    const total = mono.length;
+    const win = hannWindow(N);
+    const re = new Float32Array(N), im = new Float32Array(N);
+    const dbArr = new Float32Array(binCount);
+    const layout = computeRowLayout(h, nyquist, binCount);
+    const img = ctx.createImageData(W, h);
+    for (let x = 0; x < W; x++) {
+      // Center the analysis window on the time this x-pixel represents.
+      const center = Math.round((x / (W - 1 || 1)) * (total - 1));
+      const off = center - (N >> 1);
+      for (let i = 0; i < N; i++) {
+        const idx = off + i;
+        re[i] = (idx >= 0 && idx < total) ? mono[idx] * win[i] : 0;
+        im[i] = 0;
+      }
+      fftRadix2(re, im);
+      for (let k = 0; k < binCount; k++) {
+        const mag = Math.hypot(re[k], im[k]) / N;
+        dbArr[k] = 20 * Math.log10(mag < 1e-9 ? 1e-9 : mag);
+      }
+      paintColumn(img.data, W, x, 1, h, dbArr, layout);
+    }
+    ctx.putImageData(img, 0, 0);
+    drawSelOverlay(); // keep any existing box visible over the fresh render
+  }
+
+  // ---- Recording (captures the live mic stream) ----
+  function startRecording() {
+    if (state.recActive || !state.stream) return;
+    state.recChunks = [];
+    let rec;
+    try {
+      rec = new MediaRecorder(state.stream); // let the browser pick the mime
+    } catch (err) { handleError(err); return; }
+    state.recorder = rec;
+    rec.ondataavailable = (e) => { if (e.data && e.data.size) state.recChunks.push(e.data); };
+    rec.onstop = async () => {
+      try {
+        const blob = new Blob(state.recChunks);
+        const arr = await blob.arrayBuffer();
+        ensureAudioCtx();
+        state.recording = await state.audioCtx.decodeAudioData(arr);
+        state.recDuration = state.recording.duration;
+        enterPlayback();
+      } catch (err) { handleError(err); }
+    };
+    rec.start();
+    state.recActive = true;
+    renderRecord();
+    setStatus('Recording… tap ● again to stop and replay.');
+  }
+
+  function stopRecording() {
+    if (!state.recActive) return;
+    state.recActive = false;
+    try { state.recorder.stop(); } catch (_) {}
+    renderRecord();
+    setStatus('Processing recording…');
+  }
+
+  // ---- View switching ----
+  function enterPlayback() {
+    state.view = 'playback';
+    document.body.classList.add('playback');
+    playbackBar.hidden = false;
+    state.sel = null;
+    playBandBtn.disabled = true;
+    selInfo.textContent = '';
+    resizeCanvas();              // size selCanvas to match
+    renderStaticSpectrogram();
+    renderRecord();
+    setStatus(`Recording ready (${state.recDuration.toFixed(1)} s). Drag a box to isolate a band.`);
+  }
+
+  function enterLive() {
+    stopSelectionPlayback();
+    state.view = 'live';
+    document.body.classList.remove('playback');
+    playbackBar.hidden = true;
+    state.sel = null;
+    clearSelOverlay();
+    clearCanvas();              // wipe the static image; live scroll repaints
+    state.lastT = 0;
+    renderRecord();
+    if (state.running) setStatus('Listening…');
+    else setStatus('Ready. Tap ▶ to begin.');
+  }
+
+  // ---- Selection box (playback only) ----
+  let dragging = false, dragX = 0, dragY = 0, curX = 0, curY = 0;
+
+  // CSS-pixel y → frequency, mirroring the live row mapping exactly.
+  function freqAtY(yCss, hCss) {
+    const nyquist = state.audioCtx.sampleRate / 2;
+    const { fmin, fmax } = freqRange(nyquist);
+    const frac = 1 - yCss / (hCss - 1 || 1);
+    return state.log ? fmin * Math.exp(frac * Math.log(fmax / fmin)) : fmin + frac * (fmax - fmin);
+  }
+
+  function onSelDown(e) {
+    if (state.view !== 'playback') return;
+    selCanvas.setPointerCapture(e.pointerId);
+    const r = selCanvas.getBoundingClientRect();
+    dragX = e.clientX - r.left; dragY = e.clientY - r.top;
+    curX = dragX; curY = dragY;
+    dragging = true;
+  }
+  function onSelMove(e) {
+    if (!dragging) return;
+    const r = selCanvas.getBoundingClientRect();
+    curX = e.clientX - r.left; curY = e.clientY - r.top;
+    drawSelOverlay();
+  }
+  function onSelUp(e) {
+    if (!dragging) return;
+    dragging = false;
+    const r = selCanvas.getBoundingClientRect();
+    const x0 = Math.max(0, Math.min(dragX, curX));
+    const x1 = Math.min(r.width, Math.max(dragX, curX));
+    const y0 = Math.max(0, Math.min(dragY, curY)); // top (higher freq)
+    const y1 = Math.min(r.height, Math.max(dragY, curY));
+    if (x1 - x0 < 4 || y1 - y0 < 4) { state.sel = null; drawSelOverlay(); playBandBtn.disabled = true; selInfo.textContent = ''; return; }
+    const t0 = (x0 / r.width) * state.recDuration;
+    const t1 = (x1 / r.width) * state.recDuration;
+    const fHi = freqAtY(y0, r.height);
+    const fLo = freqAtY(y1, r.height);
+    state.sel = { x0, x1, y0, y1, t0, t1, fLo, fHi };
+    playBandBtn.disabled = false;
+    selInfo.textContent = `${Math.round(fLo)}–${Math.round(fHi)} Hz · ${t0.toFixed(2)}–${t1.toFixed(2)} s`;
+    drawSelOverlay();
+  }
+
+  function clearSelOverlay() {
+    selCtx.clearRect(0, 0, selCanvas.width, selCanvas.height);
+  }
+  // Redraw the box (committed or in-progress) plus an optional playback cursor.
+  function drawSelOverlay(cursorXCss) {
+    const dpr = window.devicePixelRatio || 1;
+    clearSelOverlay();
+    let box = state.sel;
+    if (dragging) box = { x0: Math.min(dragX, curX), x1: Math.max(dragX, curX),
+                          y0: Math.min(dragY, curY), y1: Math.max(dragY, curY) };
+    if (box) {
+      const x = box.x0 * dpr, y = box.y0 * dpr;
+      const w = (box.x1 - box.x0) * dpr, h = (box.y1 - box.y0) * dpr;
+      selCtx.fillStyle = 'rgba(78,161,255,0.12)';
+      selCtx.fillRect(x, y, w, h);
+      selCtx.strokeStyle = '#4ea1ff';
+      selCtx.lineWidth = Math.max(1, dpr);
+      selCtx.strokeRect(x + 0.5, y + 0.5, w, h);
+    }
+    if (cursorXCss != null) {
+      selCtx.strokeStyle = '#ffffff';
+      selCtx.lineWidth = Math.max(1, dpr);
+      selCtx.beginPath();
+      selCtx.moveTo(cursorXCss * dpr + 0.5, 0);
+      selCtx.lineTo(cursorXCss * dpr + 0.5, selCanvas.height);
+      selCtx.stroke();
+    }
+  }
+
+  // ---- Hear the isolated band ----
+  // A highpass at fLo + lowpass at fHi, each cascaded ×2 for a steeper, cleaner
+  // passband than a single bandpass. Edges that reach the spectrum limits drop
+  // the corresponding filter so they don't needlessly attenuate.
+  function playSelection() {
+    if (!state.sel || !state.recording) return;
+    stopSelectionPlayback();
+    ensureAudioCtx();
+    if (state.audioCtx.state === 'suspended') state.audioCtx.resume();
+    const { t0, t1, fLo, fHi } = state.sel;
+    const nyquist = state.audioCtx.sampleRate / 2;
+    const src = state.audioCtx.createBufferSource();
+    src.buffer = state.recording;
+
+    const chain = [];
+    if (fLo > 25) { chain.push(['highpass', fLo]); chain.push(['highpass', fLo]); }
+    if (fHi < nyquist * 0.98) { chain.push(['lowpass', fHi]); chain.push(['lowpass', fHi]); }
+    let node = src;
+    for (const [type, freq] of chain) {
+      const f = state.audioCtx.createBiquadFilter();
+      f.type = type; f.frequency.value = freq; f.Q.value = 0.707;
+      node.connect(f); node = f;
+    }
+    node.connect(state.audioCtx.destination);
+
+    const loop = loopChk.checked;
+    const dur = Math.max(0.01, t1 - t0);
+    if (loop) { src.loop = true; src.loopStart = t0; src.loopEnd = t1; src.start(0, t0); }
+    else src.start(0, t0, dur);
+    state.playSource = src;
+
+    // Sweep a cursor across the selection in lockstep with audioCtx time.
+    const startAt = state.audioCtx.currentTime;
+    const x0 = state.sel.x0, x1 = state.sel.x1;
+    const sweep = () => {
+      const el = state.audioCtx.currentTime - startAt;
+      if (!loop && el >= dur) { stopSelectionPlayback(); return; }
+      const frac = dur > 0 ? (el % dur) / dur : 0;
+      drawSelOverlay(x0 + (x1 - x0) * frac);
+      state.playRafId = requestAnimationFrame(sweep);
+    };
+    src.onended = () => { if (!loop) stopSelectionPlayback(); };
+    state.playRafId = requestAnimationFrame(sweep);
+    renderRecord();
+  }
+
+  function stopSelectionPlayback() {
+    if (state.playRafId) { cancelAnimationFrame(state.playRafId); state.playRafId = 0; }
+    if (state.playSource) {
+      try { state.playSource.onended = null; state.playSource.stop(); } catch (_) {}
+      try { state.playSource.disconnect(); } catch (_) {}
+      state.playSource = null;
+    }
+    drawSelOverlay(); // remove cursor, keep box
+    renderRecord();
+  }
+
   // ---- Audio ----
   async function start() {
     try {
@@ -652,6 +980,17 @@
     playBtn.classList.toggle('recording', state.running);
   }
 
+  // Reflect record/playback state on the ● button and the Play-band button.
+  function renderRecord() {
+    recordBtn.textContent = state.recActive ? '■' : '●';
+    recordBtn.title = state.recActive ? 'Stop recording'
+      : state.view === 'playback' ? 'Record a new take' : 'Record this session';
+    recordBtn.setAttribute('aria-label', state.recActive ? 'Stop recording' : 'Record');
+    recordBtn.classList.toggle('recording', state.recActive);
+    const playing = !!state.playSource;
+    playBandBtn.textContent = playing ? '⏸ Stop' : '▶ Play band';
+  }
+
   function applyFft() {
     if (!state.analyser) return;
     state.analyser.fftSize = parseInt(fftSelect.value, 10);
@@ -698,6 +1037,28 @@
     setStatus(state.paused ? 'Paused (mic still live).' : 'Listening…');
     renderPlay();
   });
+
+  // ● toggles capture; while reviewing a take it starts a fresh one (back to live first).
+  recordBtn.addEventListener('click', () => {
+    if (state.recActive) { stopRecording(); return; }
+    if (state.view === 'playback') enterLive();
+    if (!state.running) {
+      try { ensureAudioCtx(); } catch (_) {}
+      setStatus('Tap ▶ to start the mic, then ● to record.');
+      return;
+    }
+    startRecording();
+  });
+
+  playBandBtn.addEventListener('click', () => {
+    if (state.playSource) stopSelectionPlayback();
+    else playSelection();
+  });
+  backLiveBtn.addEventListener('click', enterLive);
+  selCanvas.addEventListener('pointerdown', onSelDown);
+  selCanvas.addEventListener('pointermove', onSelMove);
+  selCanvas.addEventListener('pointerup', onSelUp);
+  selCanvas.addEventListener('pointercancel', onSelUp);
 
   function clearCanvas() {
     ctx.fillStyle = '#000';
@@ -747,19 +1108,35 @@
     if (state.running) { stop(); start(); }
   });
 
+  // After an appearance change, repaint the static recording and refresh the
+  // selection's frequency readout (its Hz depend on the y→freq mapping).
+  function refreshStatic() {
+    if (state.view !== 'playback') return;
+    if (state.sel) {
+      const hCss = selCanvas.getBoundingClientRect().height;
+      state.sel.fHi = freqAtY(state.sel.y0, hCss);
+      state.sel.fLo = freqAtY(state.sel.y1, hCss);
+      selInfo.textContent = `${Math.round(state.sel.fLo)}–${Math.round(state.sel.fHi)} Hz · ${state.sel.t0.toFixed(2)}–${state.sel.t1.toFixed(2)} s`;
+    }
+    renderStaticSpectrogram();
+  }
+
   fftSelect.addEventListener('change', () => {
     applyFft();
     if (state.running) setStatus(`FFT ${state.analyser.fftSize}.`);
+    refreshStatic();
   });
 
   colorSelect.addEventListener('change', () => {
     state.colormap = colorSelect.value;
     state.lut = buildLut(state.colormap);
+    refreshStatic();
   });
 
   logToggle.addEventListener('change', () => {
     state.log = logToggle.checked;
     drawAxis();
+    refreshStatic();
   });
 
   // Rainbow draws its own per-zone palette, so the global Colors picker has
@@ -774,6 +1151,7 @@
     state.acc = 0; // classic scroll accumulator: no burst when switching back
     syncModeControls();
     drawAxis();
+    refreshStatic();
   });
 
   function applyFreqRange() {
@@ -785,6 +1163,7 @@
     state.fmin = lo;
     state.fmax = hi;
     drawAxis();
+    refreshStatic();
   }
   minFreqInput.addEventListener('change', applyFreqRange);
   maxFreqInput.addEventListener('change', applyFreqRange);
@@ -792,10 +1171,12 @@
   floorRange.addEventListener('input', () => {
     state.floor = parseFloat(floorRange.value);
     floorVal.textContent = state.floor;
+    refreshStatic();
   });
   ceilRange.addEventListener('input', () => {
     state.ceil = parseFloat(ceilRange.value);
     ceilVal.textContent = state.ceil;
+    refreshStatic();
   });
   smoothRange.addEventListener('input', () => {
     const v = parseFloat(smoothRange.value);
@@ -805,6 +1186,7 @@
   contrastRange.addEventListener('input', () => {
     state.gamma = parseFloat(contrastRange.value);
     contrastVal.textContent = state.gamma.toFixed(1);
+    refreshStatic();
   });
   speedRange.addEventListener('input', () => {
     state.speed = parseInt(speedRange.value, 10);
@@ -872,6 +1254,8 @@
   initControls();
   syncModeControls();
   renderPlay();
+  renderRecord();
+  if (typeof MediaRecorder === 'undefined') recordBtn.disabled = true;
 
   // Controls start hidden everywhere — only the floating buttons show.
 
