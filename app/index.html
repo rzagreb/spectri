@@ -128,9 +128,12 @@
 
   <!-- Playback toolbar — only visible after a recording is captured. -->
   <div class="playback-bar" id="playbackBar" hidden>
-    <span class="pb-hint">Drag a box on the spectrogram to isolate a band, then:</span>
+    <span class="pb-hint">Drag a box to isolate a band, then:</span>
+    <button id="selectAllBtn" class="btn" type="button">Select all</button>
     <button id="playBandBtn" class="btn btn-primary" type="button" disabled>▶ Play band</button>
     <label class="checkbox"><input type="checkbox" id="loopChk" /> Loop</label>
+    <button id="saveBandBtn" class="btn" type="button" disabled
+      title="Download the selected region as a WAV (time-clipped and band-filtered)">⬇ Save WAV</button>
     <span id="selInfo" class="sel-info"></span>
     <button id="backLiveBtn" class="btn" type="button">Back to live</button>
   </div>

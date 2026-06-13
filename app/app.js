@@ -45,8 +45,10 @@
   const overlay = $('overlay');
   const statusEl = $('status');
   const playbackBar = $('playbackBar');
+  const selectAllBtn = $('selectAllBtn');
   const playBandBtn = $('playBandBtn');
   const loopChk = $('loopChk');
+  const saveBandBtn = $('saveBandBtn');
   const selInfo = $('selInfo');
   const backLiveBtn = $('backLiveBtn');
 
@@ -760,6 +762,7 @@
     playbackBar.hidden = false;
     state.sel = null;
     playBandBtn.disabled = true;
+    saveBandBtn.disabled = true;
     selInfo.textContent = '';
     resizeCanvas();              // size selCanvas to match
     renderStaticSpectrogram();
@@ -814,13 +817,18 @@
     const x1 = Math.min(r.width, Math.max(dragX, curX));
     const y0 = Math.max(0, Math.min(dragY, curY)); // top (higher freq)
     const y1 = Math.min(r.height, Math.max(dragY, curY));
-    if (x1 - x0 < 4 || y1 - y0 < 4) { state.sel = null; drawSelOverlay(); playBandBtn.disabled = true; selInfo.textContent = ''; return; }
+    if (x1 - x0 < 4 || y1 - y0 < 4) {
+      state.sel = null; drawSelOverlay();
+      playBandBtn.disabled = true; saveBandBtn.disabled = true; selInfo.textContent = '';
+      return;
+    }
     const t0 = (x0 / r.width) * state.recDuration;
     const t1 = (x1 / r.width) * state.recDuration;
     const fHi = freqAtY(y0, r.height);
     const fLo = freqAtY(y1, r.height);
     state.sel = { x0, x1, y0, y1, t0, t1, fLo, fHi };
     playBandBtn.disabled = false;
+    saveBandBtn.disabled = false;
     selInfo.textContent = `${Math.round(fLo)}–${Math.round(fHi)} Hz · ${t0.toFixed(2)}–${t1.toFixed(2)} s`;
     drawSelOverlay();
   }
@@ -857,27 +865,32 @@
   // ---- Hear the isolated band ----
   // A highpass at fLo + lowpass at fHi, each cascaded ×2 for a steeper, cleaner
   // passband than a single bandpass. Edges that reach the spectrum limits drop
-  // the corresponding filter so they don't needlessly attenuate.
+  // the corresponding filter so they don't needlessly attenuate. Returns the
+  // tail node so the caller can connect it to a destination; shared by live
+  // playback and the offline WAV export.
+  function buildBandChain(ac, src, fLo, fHi) {
+    const nyquist = ac.sampleRate / 2;
+    const chain = [];
+    if (fLo > 25) { chain.push(['highpass', fLo]); chain.push(['highpass', fLo]); }
+    if (fHi < nyquist * 0.98) { chain.push(['lowpass', fHi]); chain.push(['lowpass', fHi]); }
+    let node = src;
+    for (const [type, freq] of chain) {
+      const f = ac.createBiquadFilter();
+      f.type = type; f.frequency.value = freq; f.Q.value = 0.707;
+      node.connect(f); node = f;
+    }
+    return node;
+  }
+
   function playSelection() {
     if (!state.sel || !state.recording) return;
     stopSelectionPlayback();
     ensureAudioCtx();
     if (state.audioCtx.state === 'suspended') state.audioCtx.resume();
     const { t0, t1, fLo, fHi } = state.sel;
-    const nyquist = state.audioCtx.sampleRate / 2;
     const src = state.audioCtx.createBufferSource();
     src.buffer = state.recording;
-
-    const chain = [];
-    if (fLo > 25) { chain.push(['highpass', fLo]); chain.push(['highpass', fLo]); }
-    if (fHi < nyquist * 0.98) { chain.push(['lowpass', fHi]); chain.push(['lowpass', fHi]); }
-    let node = src;
-    for (const [type, freq] of chain) {
-      const f = state.audioCtx.createBiquadFilter();
-      f.type = type; f.frequency.value = freq; f.Q.value = 0.707;
-      node.connect(f); node = f;
-    }
-    node.connect(state.audioCtx.destination);
+    buildBandChain(state.audioCtx, src, fLo, fHi).connect(state.audioCtx.destination);
 
     const loop = loopChk.checked;
     const dur = Math.max(0.01, t1 - t0);
@@ -909,6 +922,88 @@
     }
     drawSelOverlay(); // remove cursor, keep box
     renderRecord();
+  }
+
+  // ---- Select the whole recording (full time × full displayed range) ----
+  function selectAll() {
+    if (state.view !== 'playback' || !state.recording) return;
+    const r = selCanvas.getBoundingClientRect();
+    state.sel = {
+      x0: 0, x1: r.width, y0: 0, y1: r.height,
+      t0: 0, t1: state.recDuration,
+      fHi: freqAtY(0, r.height), fLo: freqAtY(r.height, r.height),
+    };
+    playBandBtn.disabled = false;
+    saveBandBtn.disabled = false;
+    selInfo.textContent = `${Math.round(state.sel.fLo)}–${Math.round(state.sel.fHi)} Hz · ${state.sel.t0.toFixed(2)}–${state.sel.t1.toFixed(2)} s`;
+    drawSelOverlay();
+  }
+
+  // ---- Export the selection to a WAV file ----
+  // Re-render the chosen time slice through the same band filters offline (so
+  // the file matches what you hear), then encode 16-bit PCM and download it.
+  function renderSelectionBuffer(sel) {
+    const buf = state.recording;
+    const rate = buf.sampleRate;
+    const dur = Math.max(0.01, sel.t1 - sel.t0);
+    const frames = Math.max(1, Math.ceil(dur * rate));
+    const OAC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+    const offline = new OAC(buf.numberOfChannels, frames, rate);
+    const src = offline.createBufferSource();
+    src.buffer = buf;
+    buildBandChain(offline, src, sel.fLo, sel.fHi).connect(offline.destination);
+    src.start(0, sel.t0, dur);
+    return offline.startRendering();
+  }
+
+  function audioBufferToWav(buf) {
+    const numCh = buf.numberOfChannels, len = buf.length, rate = buf.sampleRate;
+    const blockAlign = numCh * 2;            // 16-bit samples
+    const dataLen = len * blockAlign;
+    const view = new DataView(new ArrayBuffer(44 + dataLen));
+    const str = (off, s) => { for (let i = 0; i < s.length; i++) view.setUint8(off + i, s.charCodeAt(i)); };
+    str(0, 'RIFF'); view.setUint32(4, 36 + dataLen, true); str(8, 'WAVE');
+    str(12, 'fmt '); view.setUint32(16, 16, true); view.setUint16(20, 1, true);
+    view.setUint16(22, numCh, true); view.setUint32(24, rate, true);
+    view.setUint32(28, rate * blockAlign, true); view.setUint16(32, blockAlign, true);
+    view.setUint16(34, 16, true);
+    str(36, 'data'); view.setUint32(40, dataLen, true);
+    const chans = [];
+    for (let c = 0; c < numCh; c++) chans.push(buf.getChannelData(c));
+    let off = 44;
+    for (let i = 0; i < len; i++) {
+      for (let c = 0; c < numCh; c++) {
+        let s = chans[c][i];
+        s = s < -1 ? -1 : s > 1 ? 1 : s;
+        view.setInt16(off, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+        off += 2;
+      }
+    }
+    return new Blob([view], { type: 'audio/wav' });
+  }
+
+  function downloadBlob(blob, name) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = name;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  async function saveSelection() {
+    if (!state.sel || !state.recording) return;
+    saveBandBtn.disabled = true;
+    setStatus('Rendering WAV…');
+    try {
+      const out = await renderSelectionBuffer(state.sel);
+      const { fLo, fHi } = state.sel;
+      downloadBlob(audioBufferToWav(out), `spectri_${Math.round(fLo)}-${Math.round(fHi)}Hz.wav`);
+      setStatus('Saved WAV.');
+    } catch (err) {
+      handleError(err);
+    } finally {
+      saveBandBtn.disabled = !state.sel;
+    }
   }
 
   // ---- Audio ----
@@ -1054,6 +1149,8 @@
     if (state.playSource) stopSelectionPlayback();
     else playSelection();
   });
+  selectAllBtn.addEventListener('click', selectAll);
+  saveBandBtn.addEventListener('click', saveSelection);
   backLiveBtn.addEventListener('click', enterLive);
   selCanvas.addEventListener('pointerdown', onSelDown);
   selCanvas.addEventListener('pointermove', onSelMove);
